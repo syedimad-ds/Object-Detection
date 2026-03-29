@@ -1,3 +1,8 @@
+![TensorFlow.js](https://img.shields.io/badge/TensorFlow.js-FF6F00?logo=tensorflow&logoColor=white)
+![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-blue)
+![WebGL](https://img.shields.io/badge/WebGL-Enabled-green)
+![Status](https://img.shields.io/badge/Status-Active-success)
+
 # 🚀 Real-Time Edge AI: Object Detection Web App  
 **Powered by YOLOv8s & TensorFlow.js**
 
@@ -35,7 +40,7 @@ Object-Detection/
     ├── group1-shard4of6.bin
     ├── group1-shard5of6.bin
     └── group1-shard6of6.bin
-
+```
 ---
 
 ## 📄 File Descriptions
@@ -77,8 +82,41 @@ Object-Detection/
 
 ## 🚀 How to Run Locally
 
-- **git clone https://github.com/syedimad-ds/Object-Detection.git
-- **cd Object-Detection
-- **Open using a local server (VS Code Live Server recommended)
-- **Allow camera permissions
-- **Start real-time object detection
+```text
+1.git clone https://github.com/syedimad-ds/Object-Detection.git
+2.cd Object-Detection
+3.Open using a local server (VS Code Live Server recommended)
+4.Allow camera permissions
+5.Start real-time object detection
+```
+---
+
+## 🛣️ Future Roadmap
+
+- Custom model training (e.g., watches, electronics)  
+- WebGPU backend integration for faster inference  
+- Temporal smoothing for stable predictions  
+
+---
+
+## 📊 Project Highlights (For Recruiters)
+
+- ⚡ **Real-time Edge AI in Browser** — Zero backend dependency  
+- 🔒 **Privacy-first architecture** — No data leaves user device  
+- 🧠 **YOLOv8 + TensorFlow.js deployment**  
+- 🎯 **Optimized inference pipeline (NMS + preprocessing)**  
+
+### 💡 Demonstrates strong understanding of:
+- Computer Vision  
+- Deep Learning Deployment  
+- Web-based AI systems  
+- Performance optimization  
+
+
+## 👨‍💻 Author
+
+**Syed Imad Muzaffar**  
+🎓 3rd Year B.E. Student — AI & Data Science
+
+
+
