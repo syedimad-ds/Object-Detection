@@ -9,16 +9,17 @@ let currentFacingMode = 'environment';
 let isDetecting = false; 
 
 // --- DEVICE DETECTION LOGIC ---
-// Check kar rahe hain ki user mobile par hai ya nahi
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
-// Agar mobile nahi hai (laptop hai), toh button ko hide kar do
 if (!isMobile && switchCamBtn) {
     switchCamBtn.style.display = 'none';
 }
 
-// Mobile hai toh Nano ('n'), Laptop hai toh Small ('s')
 const modelPath = isMobile ? './yolov8n_web_model/model.json' : './yolov8s_web_model/model.json';
+
+// FIX 1: DYNAMIC THRESHOLD (Mobile ke liye kam, Laptop ke liye zyada)
+const CONF_THRESHOLD = isMobile ? 0.25 : 0.40; 
+const IOU_THRESHOLD = 0.40;
 
 const yoloClasses = [
     'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 
@@ -60,13 +61,21 @@ function calculateIOU(box1, box2) {
 
 async function loadModel() {
     try {
+        // Force WebGL Backend for best performance
+        await tf.setBackend('webgl');
         await tf.ready();
         
-        // Console mein message daal diya taaki debugging mein aasaani ho
-        console.log(`Loading model: ${modelPath}`);
-        
+        statusDiv.innerText = "⏳ Downloading Model Files...";
         model = await tf.loadGraphModel(modelPath);
         
+        // FIX 2: THE WARM-UP ENGINE (Prevents the 2-minute laptop freeze)
+        statusDiv.innerText = "🔥 Warming up AI Engine... (Please wait)";
+        const dummyInput = tf.zeros([1, 640, 640, 3]);
+        const warmupStart = Date.now();
+        const dummyOutput = await model.executeAsync(dummyInput);
+        tf.dispose([dummyInput, dummyOutput]); // Clean memory
+        console.log(`Warmup completed in ${Date.now() - warmupStart}ms`);
+
         const modeText = isMobile ? "Fast Mode (Nano)" : "High Accuracy Mode (Small)";
         statusDiv.className = "alert alert-success d-inline-block shadow-sm";
         statusDiv.innerText = `✅ Model Loaded! System Active. [${modeText}]`;
@@ -87,7 +96,7 @@ async function startWebcam() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
             video: { 
-                facingMode: isMobile ? currentFacingMode : 'user', // Laptop par hamesha 'user' rahega
+                facingMode: isMobile ? currentFacingMode : 'user',
                 width: { ideal: 640 },
                 height: { ideal: 480 }
             } 
@@ -110,7 +119,7 @@ async function startWebcam() {
 
 if(switchCamBtn) {
     switchCamBtn.addEventListener('click', () => {
-        if (!isMobile) return; // Laptop par click kaam nahi karega
+        if (!isMobile) return; 
         currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
         switchCamBtn.innerText = "🔄 Switching...";
         setTimeout(() => { switchCamBtn.innerText = "🔄 Switch Camera"; }, 1000);
@@ -131,8 +140,7 @@ async function detectFrame() {
                 .div(255.0);
         });
 
-        await tf.nextFrame(); 
-
+        // Use execute() instead of executeAsync() if possible for faster sync processing
         const predictions = await model.executeAsync(tfImg);
         const tensorOutput = Array.isArray(predictions) ? predictions[0] : predictions;
         
@@ -141,8 +149,6 @@ async function detectFrame() {
         const detections = data[0]; 
 
         let candidates = [];
-        const CONF_THRESHOLD = 0.45; 
-        const IOU_THRESHOLD = 0.30;
 
         if (shape[1] === 84 || shape[1] === 80) {
             const numClasses = shape[1] - 4; 
@@ -192,7 +198,6 @@ async function detectFrame() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         
         ctx.save();
-        // Mirror effect logic: Mobile front cam ya Laptop cam ke liye
         if (currentFacingMode === 'user' || !isMobile) {
             ctx.translate(canvas.width, 0);
             ctx.scale(-1, 1);
@@ -255,6 +260,9 @@ async function detectFrame() {
         // Silent catch
     }
     
+    // FIX 3: Frame Pacing - Request next frame only after current is fully drawn
+    // Isse browser ko saans lene ka mauka milega aur phone hang nahi hoga
+    await tf.nextFrame();
     requestAnimationFrame(detectFrame);
 }
 
