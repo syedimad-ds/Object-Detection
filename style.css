@@ -1,113 +1,343 @@
-/* --- Global Premium Dark Theme --- */
-body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    /* Ek deep radial gradient jo flat black se zyada depth deta hai */
-    background: radial-gradient(circle at top center, #1e2420 0%, #0d1117 100%);
-    color: #e6edf3;
+/* ================================================================
+   EDGE AI — Object Detection UI
+   Theme: Dark Tactical · Neon Accents · Clean & Performant
+   ================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Outfit:wght@300;400;600;700&display=swap');
+
+/* ---- CSS Variables ---- */
+:root {
+    --green:      #00ff88;
+    --green-dim:  rgba(0, 255, 136, 0.15);
+    --green-glow: rgba(0, 255, 136, 0.35);
+    --bg-deep:    #080e0b;
+    --bg-card:    #0f1914;
+    --border:     rgba(0, 255, 136, 0.18);
+    --text-hi:    #e8f5ee;
+    --text-lo:    #5a7a65;
+    --scan-amber: #ffb21d;
+    --red-err:    #ff4d4d;
+    --radius:     14px;
+}
+
+/* ---- Reset & Base ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    height: 100%;
+    background: var(--bg-deep);
+    color: var(--text-hi);
+    font-family: 'Outfit', sans-serif;
+    overflow-x: hidden;
     min-height: 100vh;
-    margin: 0;
 }
 
-/* --- Typography Enhancements --- */
-h1.text-success {
-    color: #00ff88 !important; /* Neon AI green */
-    text-shadow: 0 0 15px rgba(0, 255, 136, 0.3); /* Subtle text glow */
-    letter-spacing: 1px;
+/* Subtle grid texture */
+body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+        linear-gradient(rgba(0,255,136,0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,136,0.025) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
 }
 
-/* --- Status Badge Styling (Pill shape with animations) --- */
-#status {
-    border-radius: 50px; /* Modern rounded pill shape */
-    padding: 8px 24px;
+/* ---- Header ---- */
+.app-header {
+    position: relative;
+    z-index: 10;
+    padding: 18px 28px 14px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(8, 14, 11, 0.85);
+    backdrop-filter: blur(12px);
+}
+
+.header-content {
+    max-width: 900px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.brand-icon {
+    font-size: 28px;
+    color: var(--green);
+    filter: drop-shadow(0 0 8px var(--green-glow));
+    animation: hexPulse 3s ease-in-out infinite;
+    line-height: 1;
+}
+
+@keyframes hexPulse {
+    0%, 100% { opacity: 1; filter: drop-shadow(0 0 8px var(--green-glow)); }
+    50%       { opacity: 0.7; filter: drop-shadow(0 0 18px var(--green)); }
+}
+
+.brand-text h1 {
+    font-family: 'Space Mono', monospace;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--text-hi);
+    line-height: 1;
+}
+
+.brand-accent {
+    color: var(--green);
+    text-shadow: 0 0 12px var(--green-glow);
+}
+
+.brand-sub {
+    font-size: 0.72rem;
+    color: var(--text-lo);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-top: 3px;
+}
+
+/* ---- Header Stats ---- */
+.header-stats {
+    display: flex;
+    gap: 10px;
+}
+
+.stat-chip {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    min-width: 64px;
+}
+
+.stat-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.58rem;
+    color: var(--text-lo);
+    letter-spacing: 0.12em;
+}
+
+.stat-value {
+    font-family: 'Space Mono', monospace;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--green);
+    text-shadow: 0 0 8px var(--green-glow);
+    line-height: 1;
+}
+
+/* ---- Status Bar ---- */
+.status-container {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    justify-content: center;
+    padding: 14px 20px 0;
+}
+
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 22px;
+    border-radius: 50px;
+    font-size: 0.82rem;
     font-weight: 600;
-    letter-spacing: 0.5px;
-    border: none;
-    backdrop-filter: blur(5px); /* Glassmorphism touch */
+    letter-spacing: 0.03em;
+    border: 1px solid transparent;
+    transition: all 0.3s ease;
+    font-family: 'Outfit', sans-serif;
 }
 
-/* Custom Alert Colors to match the dark theme */
-.alert-warning {
-    background-color: rgba(255, 193, 7, 0.1) !important;
-    color: #ffc107 !important;
-    border: 1px solid rgba(255, 193, 7, 0.3) !important;
-    animation: pulse 2s infinite; /* Loading time par pulse karega */
+.status-loading {
+    background: rgba(255, 193, 7, 0.1);
+    border-color: rgba(255, 193, 7, 0.3);
+    color: var(--scan-amber);
+    animation: pulseAmber 2s ease-in-out infinite;
 }
 
-.alert-success {
-    background-color: rgba(0, 255, 136, 0.1) !important;
-    color: #00ff88 !important;
-    border: 1px solid rgba(0, 255, 136, 0.3) !important;
+.status-active {
+    background: var(--green-dim);
+    border-color: var(--green-glow);
+    color: var(--green);
 }
 
-/* --- Pulse Animation for Loading --- */
-@keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.4); }
-    70% { box-shadow: 0 0 0 10px rgba(255, 193, 7, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0); }
+.status-scanning {
+    background: rgba(255, 193, 7, 0.08);
+    border-color: rgba(255, 193, 7, 0.2);
+    color: rgba(255, 193, 7, 0.8);
 }
 
-/* --- The Main Video Engine Container --- */
+.status-error {
+    background: rgba(255, 77, 77, 0.1);
+    border-color: rgba(255, 77, 77, 0.3);
+    color: var(--red-err);
+}
+
+@keyframes pulseAmber {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.3); }
+    50%       { box-shadow: 0 0 0 8px rgba(255, 193, 7, 0); }
+}
+
+/* ---- Viewport ---- */
+.viewport-container {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    justify-content: center;
+    padding: 20px 16px 8px;
+}
+
 .video-wrapper {
     position: relative;
     width: 100%;
-    max-width: 720px; /* Laptops aur tablets ke liye perfect size */
-    aspect-ratio: 16/9; /* Standard cinematic widescreen format */
-    background-color: #000;
-    
-    /* Flat border ki jagah ek sleek subtle glowing edge */
-    border: 1px solid rgba(0, 255, 136, 0.2);
-    border-radius: 16px; /* Smoother corners */
+    max-width: 820px;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: var(--radius);
     overflow: hidden;
-    
-    /* Layered shadows for a 3D floating effect */
-    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.6),
-                0 0 25px rgba(0, 255, 136, 0.1); 
-    
-    transition: transform 0.4s ease, box-shadow 0.4s ease;
+    border: 1px solid var(--border);
+    box-shadow:
+        0 0 0 1px rgba(0,255,136,0.05),
+        0 20px 60px rgba(0, 0, 0, 0.7),
+        0 0 40px rgba(0, 255, 136, 0.07);
+    transition: box-shadow 0.4s ease;
 }
 
-/* Hover karne par camera screen thodi upar float karegi */
 .video-wrapper:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 20px 45px rgba(0, 0, 0, 0.8),
-                0 0 35px rgba(0, 255, 136, 0.2);
+    box-shadow:
+        0 0 0 1px rgba(0,255,136,0.1),
+        0 24px 70px rgba(0, 0, 0, 0.8),
+        0 0 55px rgba(0, 255, 136, 0.13);
 }
 
-/* --- Canvas and Video Positioning --- */
 video, canvas {
     position: absolute;
-    top: 0;
-    left: 0;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: cover;
 }
 
-video {
-    opacity: 0; /* Original video hidden, only canvas visible */
+video { opacity: 0; }
+
+/* ---- Scan-line Animation ---- */
+.scan-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--green), transparent);
+    opacity: 0;
+    z-index: 8;
+    pointer-events: none;
+    animation: scanDown 4s linear infinite;
+    box-shadow: 0 0 12px var(--green-glow);
 }
 
-/* --- Camera Switch Button Styling (Premium Deep Purple Look) --- */
+@keyframes scanDown {
+    0%   { top: 0%;   opacity: 0; }
+    5%   { opacity: 0.6; }
+    95%  { opacity: 0.3; }
+    100% { top: 100%; opacity: 0; }
+}
+
+/* ---- Corner Decorations ---- */
+.scan-corner {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    z-index: 9;
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+.scan-corner.tl { top: 10px; left: 10px;
+    border-top: 2px solid var(--green); border-left: 2px solid var(--green); }
+.scan-corner.tr { top: 10px; right: 10px;
+    border-top: 2px solid var(--green); border-right: 2px solid var(--green); }
+.scan-corner.bl { bottom: 10px; left: 10px;
+    border-bottom: 2px solid var(--green); border-left: 2px solid var(--green); }
+.scan-corner.br { bottom: 10px; right: 10px;
+    border-bottom: 2px solid var(--green); border-right: 2px solid var(--green); }
+
+/* ---- Camera Switch Button ---- */
 .cam-switch-btn {
     position: absolute;
-    top: 15px;
-    right: 15px;
-    z-index: 10;
-    background-color: #520085; /* Deep purple base */
-    color: #ffffff;
-    border: 1px solid #CB38FF; /* Neon purple border */
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 14px;
-    font-weight: 600;
+    top: 12px;
+    right: 12px;
+    z-index: 15;
+    background: rgba(8, 14, 11, 0.75);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px;
+    color: var(--green);
     cursor: pointer;
-    backdrop-filter: blur(5px);
-    transition: all 0.3s ease;
-    box-shadow: 0 4px 15px rgba(82, 0, 133, 0.5);
+    backdrop-filter: blur(8px);
+    transition: background 0.2s, transform 0.15s, box-shadow 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
 }
 
-.cam-switch-btn:hover {
-    background-color: #8438FF; /* Lighter purple on hover */
-    box-shadow: 0 6px 20px rgba(132, 56, 255, 0.6);
+.cam-switch-btn:hover:not(:disabled) {
+    background: var(--green-dim);
+    box-shadow: 0 0 14px var(--green-glow);
     transform: scale(1.05);
+}
+
+.cam-switch-btn:active:not(:disabled) { transform: scale(0.97); }
+.cam-switch-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ---- Footer info strip ---- */
+.info-strip {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 12px 20px 20px;
+    flex-wrap: wrap;
+}
+
+.info-item {
+    font-size: 0.72rem;
+    color: var(--text-lo);
+    letter-spacing: 0.04em;
+}
+
+.info-sep {
+    color: var(--border);
+    font-size: 0.72rem;
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 600px) {
+    .app-header { padding: 14px 16px 12px; }
+    .brand-text h1 { font-size: 1.2rem; }
+    .stat-chip { min-width: 54px; padding: 6px 10px; }
+    .stat-value { font-size: 0.9rem; }
+    .viewport-container { padding: 14px 10px 6px; }
+    .video-wrapper { border-radius: 10px; }
+    .info-strip { gap: 6px; }
+    .info-sep { display: none; }
+}
+
+@media (min-width: 900px) {
+    .video-wrapper { max-width: 900px; }
 }
