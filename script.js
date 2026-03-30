@@ -2,8 +2,11 @@ const video = document.getElementById('webcam');
 const canvas = document.getElementById('output_canvas');
 const ctx = canvas.getContext('2d');
 const statusDiv = document.getElementById('status');
+const switchCamBtn = document.getElementById('switchCamBtn'); // Naya button select kiya
 
 let model;
+let currentFacingMode = 'environment'; // Default: Back camera
+let isDetecting = false; // Detection loop ko manage karne ke liye
 
 // --- 1. YOLOv8 Standard 80 Classes ---
 const yoloClasses = [
@@ -19,7 +22,7 @@ const yoloClasses = [
     'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
 ];
 
-// --- 2. Color Palette for Different Classes ---
+// --- 2. Color Palette ---
 const classColors = [
     '#FF3838', '#FF9D97', '#FF701F', '#FFB21D', '#CFD231', '#48F90A', '#92CC17', '#3DDB86', '#1A9334', '#00D4BB',
     '#2C99A8', '#00C2FF', '#344593', '#6473FF', '#0018EC', '#8438FF', '#520085', '#CB38FF', '#FF95C8', '#FF37C7'
@@ -29,17 +32,12 @@ function getColor(classId) {
     return classColors[classId % classColors.length];
 }
 
-// --- 3. Helper Function: IOU (Intersection Over Union) for NMS ---
+// --- 3. NMS Logic ---
 function calculateIOU(box1, box2) {
     const b1Left = box1.x - box1.w / 2;
     const b1Right = box1.x + box1.w / 2;
     const b1Top = box1.y - box1.h / 2;
     const b1Bottom = box1.y + box1.h / 2;
-
-    const b2Left = box2.x - box2.w / 2;
-    const b2Right = box2.x + box2.w / 2;
-    const b2Top = box2.y - box2.h / 2;
-    const b2Bottom = box2.y + box2.h / 2;
 
     const xA = Math.max(b1Left, b2Left);
     const yA = Math.max(b1Top, b2Top);
@@ -52,12 +50,11 @@ function calculateIOU(box1, box2) {
     return intersectionArea / unionArea;
 }
 
-// --- 4. Load Model & Camera ---
+// --- 4. Load Model & Dynamic Camera Handling ---
 async function loadModel() {
     try {
         await tf.ready();
         model = await tf.loadGraphModel('./yolov8s_web_model/model.json');
-        
         statusDiv.className = "alert alert-success d-inline-block shadow-sm";
         statusDiv.innerText = "✅ Model Loaded! System Active.";
         startWebcam();
@@ -69,11 +66,15 @@ async function loadModel() {
 }
 
 async function startWebcam() {
+    // Agar pehle se koi camera chal raha hai, toh use band karo
+    if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+    }
+
     try {
-        // THE FIX: Mobile par Back Camera use karne ke liye facingMode 'environment'
         const stream = await navigator.mediaDevices.getUserMedia({ 
             video: { 
-                facingMode: 'environment',
+                facingMode: currentFacingMode,
                 width: { ideal: 640 },
                 height: { ideal: 480 }
             } 
@@ -83,15 +84,34 @@ async function startWebcam() {
             await video.play(); 
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            detectFrame(); 
+            
+            // Loop sirf tabhi start karo agar wo chal nahi raha hai
+            if (!isDetecting) {
+                isDetecting = true;
+                detectFrame(); 
+            }
         };
     } catch (error) {
         statusDiv.innerText = "❌ Camera Error: Please allow permissions.";
     }
 }
 
-// --- 5. Multi-Object Detection Engine (Mobile Optimized) ---
+// Button Click Event Listener
+switchCamBtn.addEventListener('click', () => {
+    // Mode ko toggle karo (Front se Back, Back se Front)
+    currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
+    
+    // Thoda visual feedback
+    switchCamBtn.innerText = "🔄 Switching...";
+    setTimeout(() => { switchCamBtn.innerText = "🔄 Switch Camera"; }, 1000);
+    
+    startWebcam(); // Naye mode ke saath camera fir se start karo
+});
+
+// --- 5. Detection Engine ---
 async function detectFrame() {
+    if (!isDetecting) return; // Stop loop if camera is switching
+
     try {
         const inputResolution = [640, 640];
         const tfImg = tf.tidy(() => {
@@ -102,8 +122,7 @@ async function detectFrame() {
                 .div(255.0);
         });
 
-        // THE FIX: Allow the browser UI to update before heavy AI calculation
-        await tf.nextFrame(); 
+        await tf.nextFrame(); // Unblock UI thread
 
         const predictions = await model.executeAsync(tfImg);
         const tensorOutput = Array.isArray(predictions) ? predictions[0] : predictions;
@@ -116,7 +135,6 @@ async function detectFrame() {
         const CONF_THRESHOLD = 0.35; 
         const IOU_THRESHOLD = 0.45;
 
-        // Process detections based on output shape
         if (shape[1] === 84 || shape[1] === 80) {
             const numClasses = shape[1] - 4; 
             const numBoxes = shape[2];
@@ -130,11 +148,7 @@ async function detectFrame() {
                     }
                 }
                 if (maxClassConf > CONF_THRESHOLD) {
-                    candidates.push({
-                        x: detections[0][col], y: detections[1][col], 
-                        w: detections[2][col], h: detections[3][col], 
-                        conf: maxClassConf, classId: classId
-                    });
+                    candidates.push({ x: detections[0][col], y: detections[1][col], w: detections[2][col], h: detections[3][col], conf: maxClassConf, classId: classId });
                 }
             }
         } else if (shape[2] === 84 || shape[2] === 80) {
@@ -150,11 +164,7 @@ async function detectFrame() {
                     }
                 }
                 if (maxClassConf > CONF_THRESHOLD) {
-                    candidates.push({
-                        x: detections[row][0], y: detections[row][1], 
-                        w: detections[row][2], h: detections[row][3], 
-                        conf: maxClassConf, classId: classId
-                    });
+                    candidates.push({ x: detections[row][0], y: detections[row][1], w: detections[row][2], h: detections[row][3], conf: maxClassConf, classId: classId });
                 }
             }
         }
@@ -171,7 +181,15 @@ async function detectFrame() {
         }
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // Front camera ke liye feed ko horizontally flip (mirror) karna padta hai
+        ctx.save();
+        if (currentFacingMode === 'user') {
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+        }
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
 
         if (finalBoxes.length > 0) {
             statusDiv.className = "alert alert-success d-inline-block shadow-sm";
@@ -191,10 +209,15 @@ async function detectFrame() {
                 const scaleX = canvas.width / inputResolution[0];
                 const scaleY = canvas.height / inputResolution[1];
                 
-                const boxW = w * scaleX;
-                const boxH = h * scaleY;
-                const left = (x * scaleX) - (boxW / 2);
-                const top = (y * scaleY) - (boxH / 2);
+                let boxW = w * scaleX;
+                let boxH = h * scaleY;
+                let left = (x * scaleX) - (boxW / 2);
+                let top = (y * scaleY) - (boxH / 2);
+
+                // Front camera mein boxes bhi flip karne padenge
+                if (currentFacingMode === 'user') {
+                    left = canvas.width - left - boxW;
+                }
 
                 ctx.strokeStyle = themeColor; 
                 ctx.lineWidth = 3;
@@ -221,7 +244,7 @@ async function detectFrame() {
         tf.dispose(predictions); 
 
     } catch (error) {
-        // Error catch
+        // Silent catch
     }
     
     requestAnimationFrame(detectFrame);

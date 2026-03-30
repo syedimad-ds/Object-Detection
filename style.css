@@ -1,88 +1,24 @@
-/* --- Global Premium Dark Theme --- */
-body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    /* Ek deep radial gradient jo flat black se zyada depth deta hai */
-    background: radial-gradient(circle at top center, #1e2420 0%, #0d1117 100%);
-    color: #e6edf3;
-    min-height: 100vh;
-    margin: 0;
-}
-
-/* --- Typography Enhancements --- */
-h1.text-success {
-    color: #00ff88 !important; /* Neon AI green */
-    text-shadow: 0 0 15px rgba(0, 255, 136, 0.3); /* Subtle text glow */
-    letter-spacing: 1px;
-}
-
-/* --- Status Badge Styling (Pill shape with animations) --- */
-#status {
-    border-radius: 50px; /* Modern rounded pill shape */
-    padding: 8px 24px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    border: none;
-    backdrop-filter: blur(5px); /* Glassmorphism touch */
-}
-
-/* Custom Alert Colors to match the dark theme */
-.alert-warning {
-    background-color: rgba(255, 193, 7, 0.1) !important;
-    color: #ffc107 !important;
-    border: 1px solid rgba(255, 193, 7, 0.3) !important;
-    animation: pulse 2s infinite; /* Loading time par pulse karega */
-}
-
-.alert-success {
-    background-color: rgba(0, 255, 136, 0.1) !important;
-    color: #00ff88 !important;
-    border: 1px solid rgba(0, 255, 136, 0.3) !important;
-}
-
-/* --- Pulse Animation for Loading --- */
-@keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.4); }
-    70% { box-shadow: 0 0 0 10px rgba(255, 193, 7, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0); }
-}
-
-/* --- The Main Video Engine Container --- */
-.video-wrapper {
-    position: relative;
-    width: 100%;
-    max-width: 720px; /* Thoda aur bada display laptops ke liye */
-    aspect-ratio: 16/9; /* Standard cinematic widescreen format */
-    background-color: #000;
-    
-    /* Flat border ki jagah ek sleek subtle glowing edge */
-    border: 1px solid rgba(0, 255, 136, 0.2);
-    border-radius: 16px; /* Smoother corners */
-    overflow: hidden;
-    
-    /* Layered shadows for a 3D floating effect */
-    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.6),
-                0 0 25px rgba(0, 255, 136, 0.1); 
-    
-    transition: transform 0.4s ease, box-shadow 0.4s ease;
-}
-
-/* Hover karne par camera screen thodi upar float karegi */
-.video-wrapper:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 20px 45px rgba(0, 0, 0, 0.8),
-                0 0 35px rgba(0, 255, 136, 0.2);
-}
-
-/* --- Canvas and Video Positioning --- */
-video, canvas {
+/* --- Camera Switch Button (Premium Look) --- */
+.cam-switch-btn {
     position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+    top: 15px;
+    right: 15px;
+    z-index: 10;
+    background-color: #520085; /* Deep purple base */
+    color: #ffffff;
+    border: 1px solid #CB38FF; /* Neon purple border */
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    backdrop-filter: blur(5px);
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 15px rgba(82, 0, 133, 0.5);
 }
 
-video {
-    opacity: 0; /* Original video hidden, only canvas visible */
+.cam-switch-btn:hover {
+    background-color: #8438FF;
+    box-shadow: 0 6px 20px rgba(132, 56, 255, 0.6);
+    transform: scale(1.05);
 }
