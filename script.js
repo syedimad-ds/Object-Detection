@@ -2,13 +2,24 @@ const video = document.getElementById('webcam');
 const canvas = document.getElementById('output_canvas');
 const ctx = canvas.getContext('2d');
 const statusDiv = document.getElementById('status');
-const switchCamBtn = document.getElementById('switchCamBtn'); // Naya button select kiya
+const switchCamBtn = document.getElementById('switchCamBtn'); 
 
 let model;
-let currentFacingMode = 'environment'; // Default: Back camera
-let isDetecting = false; // Detection loop ko manage karne ke liye
+let currentFacingMode = 'environment'; 
+let isDetecting = false; 
 
-// --- 1. YOLOv8 Standard 80 Classes ---
+// --- DEVICE DETECTION LOGIC ---
+// Check kar rahe hain ki user mobile par hai ya nahi
+const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+// Agar mobile nahi hai (laptop hai), toh button ko hide kar do
+if (!isMobile && switchCamBtn) {
+    switchCamBtn.style.display = 'none';
+}
+
+// Mobile hai toh Nano ('n'), Laptop hai toh Small ('s')
+const modelPath = isMobile ? './yolov8n_web_model/model.json' : './yolov8s_web_model/model.json';
+
 const yoloClasses = [
     'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 
     'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 
@@ -22,7 +33,6 @@ const yoloClasses = [
     'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
 ];
 
-// --- 2. Color Palette ---
 const classColors = [
     '#FF3838', '#FF9D97', '#FF701F', '#FFB21D', '#CFD231', '#48F90A', '#92CC17', '#3DDB86', '#1A9334', '#00D4BB',
     '#2C99A8', '#00C2FF', '#344593', '#6473FF', '#0018EC', '#8438FF', '#520085', '#CB38FF', '#FF95C8', '#FF37C7'
@@ -32,7 +42,6 @@ function getColor(classId) {
     return classColors[classId % classColors.length];
 }
 
-// --- 3. NMS Logic ---
 function calculateIOU(box1, box2) {
     const b1Left = box1.x - box1.w / 2;
     const b1Right = box1.x + box1.w / 2;
@@ -46,27 +55,31 @@ function calculateIOU(box1, box2) {
 
     const intersectionArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
     const unionArea = (box1.w * box1.h) + (box2.w * box2.h) - intersectionArea;
-    
     return intersectionArea / unionArea;
 }
 
-// --- 4. Load Model & Dynamic Camera Handling ---
 async function loadModel() {
     try {
         await tf.ready();
-        model = await tf.loadGraphModel('./yolov8s_web_model/model.json');
+        
+        // Console mein message daal diya taaki debugging mein aasaani ho
+        console.log(`Loading model: ${modelPath}`);
+        
+        model = await tf.loadGraphModel(modelPath);
+        
+        const modeText = isMobile ? "Fast Mode (Nano)" : "High Accuracy Mode (Small)";
         statusDiv.className = "alert alert-success d-inline-block shadow-sm";
-        statusDiv.innerText = "✅ Model Loaded! System Active.";
+        statusDiv.innerText = `✅ Model Loaded! System Active. [${modeText}]`;
+        
         startWebcam();
     } catch (error) {
         statusDiv.className = "alert alert-danger d-inline-block shadow-sm";
-        statusDiv.innerText = `❌ Error: Check Console`;
+        statusDiv.innerText = `❌ Error: Model Load Failed`;
         console.error(error);
     }
 }
 
 async function startWebcam() {
-    // Agar pehle se koi camera chal raha hai, toh use band karo
     if (video.srcObject) {
         video.srcObject.getTracks().forEach(track => track.stop());
     }
@@ -74,7 +87,7 @@ async function startWebcam() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
             video: { 
-                facingMode: currentFacingMode,
+                facingMode: isMobile ? currentFacingMode : 'user', // Laptop par hamesha 'user' rahega
                 width: { ideal: 640 },
                 height: { ideal: 480 }
             } 
@@ -85,7 +98,6 @@ async function startWebcam() {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             
-            // Loop sirf tabhi start karo agar wo chal nahi raha hai
             if (!isDetecting) {
                 isDetecting = true;
                 detectFrame(); 
@@ -96,21 +108,18 @@ async function startWebcam() {
     }
 }
 
-// Button Click Event Listener
-switchCamBtn.addEventListener('click', () => {
-    // Mode ko toggle karo (Front se Back, Back se Front)
-    currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
-    
-    // Thoda visual feedback
-    switchCamBtn.innerText = "🔄 Switching...";
-    setTimeout(() => { switchCamBtn.innerText = "🔄 Switch Camera"; }, 1000);
-    
-    startWebcam(); // Naye mode ke saath camera fir se start karo
-});
+if(switchCamBtn) {
+    switchCamBtn.addEventListener('click', () => {
+        if (!isMobile) return; // Laptop par click kaam nahi karega
+        currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
+        switchCamBtn.innerText = "🔄 Switching...";
+        setTimeout(() => { switchCamBtn.innerText = "🔄 Switch Camera"; }, 1000);
+        startWebcam(); 
+    });
+}
 
-// --- 5. Detection Engine ---
 async function detectFrame() {
-    if (!isDetecting) return; // Stop loop if camera is switching
+    if (!isDetecting) return;
 
     try {
         const inputResolution = [640, 640];
@@ -122,7 +131,7 @@ async function detectFrame() {
                 .div(255.0);
         });
 
-        await tf.nextFrame(); // Unblock UI thread
+        await tf.nextFrame(); 
 
         const predictions = await model.executeAsync(tfImg);
         const tensorOutput = Array.isArray(predictions) ? predictions[0] : predictions;
@@ -132,8 +141,8 @@ async function detectFrame() {
         const detections = data[0]; 
 
         let candidates = [];
-        const CONF_THRESHOLD = 0.35; 
-        const IOU_THRESHOLD = 0.45;
+        const CONF_THRESHOLD = 0.45; 
+        const IOU_THRESHOLD = 0.30;
 
         if (shape[1] === 84 || shape[1] === 80) {
             const numClasses = shape[1] - 4; 
@@ -182,9 +191,9 @@ async function detectFrame() {
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         
-        // Front camera ke liye feed ko horizontally flip (mirror) karna padta hai
         ctx.save();
-        if (currentFacingMode === 'user') {
+        // Mirror effect logic: Mobile front cam ya Laptop cam ke liye
+        if (currentFacingMode === 'user' || !isMobile) {
             ctx.translate(canvas.width, 0);
             ctx.scale(-1, 1);
         }
@@ -214,8 +223,7 @@ async function detectFrame() {
                 let left = (x * scaleX) - (boxW / 2);
                 let top = (y * scaleY) - (boxH / 2);
 
-                // Front camera mein boxes bhi flip karne padenge
-                if (currentFacingMode === 'user') {
+                if (currentFacingMode === 'user' || !isMobile) {
                     left = canvas.width - left - boxW;
                 }
 
