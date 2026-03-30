@@ -56,7 +56,6 @@ function calculateIOU(box1, box2) {
 async function loadModel() {
     try {
         await tf.ready();
-        // NOTE: Agar aap 's' model use kar rahe hain toh path check kar lein
         model = await tf.loadGraphModel('./yolov8s_web_model/model.json');
         
         statusDiv.className = "alert alert-success d-inline-block shadow-sm";
@@ -71,7 +70,14 @@ async function loadModel() {
 
 async function startWebcam() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // THE FIX: Mobile par Back Camera use karne ke liye facingMode 'environment'
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+                facingMode: 'environment',
+                width: { ideal: 640 },
+                height: { ideal: 480 }
+            } 
+        });
         video.srcObject = stream;
         video.onloadedmetadata = async () => { 
             await video.play(); 
@@ -80,11 +86,11 @@ async function startWebcam() {
             detectFrame(); 
         };
     } catch (error) {
-        statusDiv.innerText = "❌ Camera Error";
+        statusDiv.innerText = "❌ Camera Error: Please allow permissions.";
     }
 }
 
-// --- 5. Multi-Object Detection Engine ---
+// --- 5. Multi-Object Detection Engine (Mobile Optimized) ---
 async function detectFrame() {
     try {
         const inputResolution = [640, 640];
@@ -95,6 +101,9 @@ async function detectFrame() {
                 .toFloat()
                 .div(255.0);
         });
+
+        // THE FIX: Allow the browser UI to update before heavy AI calculation
+        await tf.nextFrame(); 
 
         const predictions = await model.executeAsync(tfImg);
         const tensorOutput = Array.isArray(predictions) ? predictions[0] : predictions;
@@ -150,7 +159,6 @@ async function detectFrame() {
             }
         }
 
-        // Apply NMS filtering
         candidates.sort((a, b) => b.conf - a.conf);
         let finalBoxes = [];
         while (candidates.length > 0) {
@@ -162,7 +170,6 @@ async function detectFrame() {
             });
         }
 
-        // --- DRAWING WITH DYNAMIC COLORS ---
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
@@ -172,11 +179,10 @@ async function detectFrame() {
 
             finalBoxes.forEach(box => {
                 const detectedName = yoloClasses[box.classId] || "Object";
-                const themeColor = getColor(box.classId); // Get color based on class
+                const themeColor = getColor(box.classId);
                 
                 let {x, y, w, h, conf} = box;
 
-                // Scale normalized coordinates
                 if (w <= 2 && h <= 2) {
                     x *= inputResolution[0]; y *= inputResolution[1];
                     w *= inputResolution[0]; h *= inputResolution[1];
@@ -190,22 +196,19 @@ async function detectFrame() {
                 const left = (x * scaleX) - (boxW / 2);
                 const top = (y * scaleY) - (boxH / 2);
 
-                // 1. Draw Box with Unique Color
                 ctx.strokeStyle = themeColor; 
                 ctx.lineWidth = 3;
                 ctx.shadowColor = themeColor;
                 ctx.shadowBlur = 8;
                 ctx.strokeRect(left, top, boxW, boxH);
 
-                // 2. Draw Label Background
                 ctx.shadowBlur = 0; 
                 ctx.fillStyle = themeColor;
                 const labelText = `${detectedName}: ${(conf * 100).toFixed(0)}%`;
                 const textWidth = ctx.measureText(labelText).width + 20;
                 ctx.fillRect(left, top - 25, textWidth, 25); 
 
-                // 3. Draw Label Text
-                ctx.fillStyle = '#ffffff'; // White text for better contrast
+                ctx.fillStyle = '#ffffff'; 
                 ctx.font = 'bold 15px "Segoe UI"';
                 ctx.fillText(labelText, left + 7, top - 7);
             });
@@ -218,7 +221,7 @@ async function detectFrame() {
         tf.dispose(predictions); 
 
     } catch (error) {
-        // Silently catch to keep the loop alive
+        // Error catch
     }
     
     requestAnimationFrame(detectFrame);
