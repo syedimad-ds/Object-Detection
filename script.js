@@ -1,5 +1,5 @@
 // ============================================================
-//  EDGE AI — Object Detection | ADAPTIVE DYNAMIC RESOLUTION
+//  EDGE AI — Object Detection | ADAPTIVE DYNAMIC RESOLUTION + HIGH ACCURACY (LETTERBOXING)
 // ============================================================
 
 const video          = document.getElementById('webcam');
@@ -16,20 +16,18 @@ const modelIndicator = document.getElementById('modelIndicator');
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
 
-// ── DYNAMIC RESOLUTION STATE (The Magic Trick) ─────────────
-let isHDMode = !isMobile; // Mobile pe off, Laptop pe on by default
+// ── DYNAMIC RESOLUTION STATE ─────────────
+let isHDMode = !isMobile; 
 
 // 320x320 for Mobile (Nano), 640x640 for Laptop/HD (Small)
 let INPUT_W = isHDMode ? 640 : 320;
 let INPUT_H = isHDMode ? 640 : 320;
 
-// ── Mobile Specific Optimizer (Offscreen Canvas) ───────────
 const processCanvas = document.createElement('canvas');
 processCanvas.width = INPUT_W;
 processCanvas.height = INPUT_H;
 const processCtx = processCanvas.getContext('2d', { willReadFrequently: true, alpha: false });
 
-// ── Session State ──────────────────────────────────────────
 let model             = null;
 let currentFacingMode = 'environment';
 let streamActive      = false;
@@ -42,10 +40,11 @@ let backendName       = 'unknown';
 let fpsCount    = 0;
 let fpsLastTime = performance.now();
 
-const modelPathNano  = './yolov8n_web_model/model.json'; // 320x320 export
-const modelPathSmall = './yolov8s_web_model/model.json'; // 640x640 export
+const modelPathNano  = './yolov8n_web_model/model.json'; 
+const modelPathSmall = './yolov8s_web_model/model.json'; 
 
-const CONF_THRESHOLD = isMobile ? 0.35 : 0.40;
+// ACCURACY TWEAK: Slightly lower threshold for mobile to catch more objects
+const CONF_THRESHOLD = isMobile ? 0.30 : 0.40;
 const IOU_THRESHOLD  = 0.45;
 const MAX_DETECTIONS = 15;
 
@@ -69,7 +68,6 @@ const CLASS_COLORS = [
 ];
 const getColor = id => CLASS_COLORS[id % CLASS_COLORS.length];
 
-// ── WebGL Tuning ───────────────────────────────────────────
 async function initBackend() {
     try {
         await tf.setBackend('webgl');
@@ -94,12 +92,11 @@ async function initBackend() {
     console.log(`✅ Backend Active: ${backendName}`);
 }
 
-// ── Model Manager ──────────────────────────────────────────
 async function loadModel() {
     try {
         setStatus('loading', `⏳ Initializing ${backendName}...`);
         if (model) {
-            model.dispose(); // Old model memory clear
+            model.dispose(); 
             model = null;
         }
 
@@ -123,16 +120,13 @@ async function loadModel() {
     }
 }
 
-// ── DYNAMIC RESOLUTION TOGGLE ──────────────────────────────
 if (hdModeBtn) {
-    // Initial UI state setup
     if (isHDMode) hdModeBtn.classList.add('active');
 
     hdModeBtn.addEventListener('click', async () => {
         isHDMode = !isHDMode;
         hdModeBtn.classList.toggle('active', isHDMode);
         
-        // Asli Switch: Update Variables & Process Canvas
         INPUT_W = isHDMode ? 640 : 320;
         INPUT_H = isHDMode ? 640 : 320;
         processCanvas.width = INPUT_W;
@@ -145,7 +139,6 @@ if (hdModeBtn) {
     });
 }
 
-// ── Camera ─────────────────────────────────────────────────
 async function startWebcam() {
     streamActive = false;
     inferenceRunning = false;
@@ -196,7 +189,6 @@ if (switchCamBtn) {
     });
 }
 
-// ── Smooth Video Render Loop ───────────────────────────────
 function startRenderLoop() {
     function frame() {
         if (!streamActive) return;
@@ -227,7 +219,6 @@ function startRenderLoop() {
     renderLoopId = requestAnimationFrame(frame);
 }
 
-// ── AI Inference Engine (GPU Accelerated NMS) ──────────────
 async function runInferenceLoop() {
     while (streamActive) {
         if (!model || video.readyState < 2 || inferenceRunning) {
@@ -238,8 +229,19 @@ async function runInferenceLoop() {
         inferenceRunning = true;
 
         try {
-            // Hardware Accelerated Resizing to current INPUT_W / INPUT_H
-            processCtx.drawImage(video, 0, 0, INPUT_W, INPUT_H);
+            // ACCURACY FIX: Letterboxing instead of Squashing
+            const vidW = video.videoWidth;
+            const vidH = video.videoHeight;
+            const scale = Math.min(INPUT_W / vidW, INPUT_H / vidH);
+            const drawW = vidW * scale;
+            const drawH = vidH * scale;
+            const padX = (INPUT_W - drawW) / 2;
+            const padY = (INPUT_H - drawH) / 2;
+
+            // Fill with standard YOLO padding color (RGB 114, 114, 114)
+            processCtx.fillStyle = '#727272'; 
+            processCtx.fillRect(0, 0, INPUT_W, INPUT_H);
+            processCtx.drawImage(video, 0, 0, vidW, vidH, padX, padY, drawW, drawH);
 
             const { nmsBoxes, maxScores, classIds } = tf.tidy(() => {
                 const inputTensor = tf.browser.fromPixels(processCanvas)
@@ -305,10 +307,15 @@ async function runInferenceLoop() {
                 let cx = x1 + w / 2;
                 let cy = y1 + h / 2;
 
-                // Scale to current INPUT_W / INPUT_H if normalized
                 if (w <= 2 && h <= 2) { 
                     cx *= INPUT_W; cy *= INPUT_H; w *= INPUT_W; h *= INPUT_H; 
                 }
+
+                // ACCURACY FIX: Re-map coordinates back from Letterboxed 320x320 to Native Video dimensions
+                cx = (cx - padX) / scale;
+                cy = (cy - padY) / scale;
+                w = w / scale;
+                h = h / scale;
 
                 processedBoxes.push({
                     x: cx, y: cy, w: w, h: h,
@@ -337,13 +344,12 @@ async function runInferenceLoop() {
     }
 }
 
-// ── UI Drawing ─────────────────────────────────────────────
 function drawBoxes(boxes) {
     if (!boxes.length) return;
 
-    // Scale from Dynamic INPUT_W / H to Canvas dimensions
-    const scaleX = canvas.width  / INPUT_W;
-    const scaleY = canvas.height / INPUT_H;
+    // Use native video dimensions mapping since boxes are now reversed from letterbox padding
+    const scaleX = canvas.width  / video.videoWidth;
+    const scaleY = canvas.height / video.videoHeight;
 
     boxes.forEach(box => {
         const color = getColor(box.classId);
@@ -352,8 +358,8 @@ function drawBoxes(boxes) {
 
         let boxW = box.w * scaleX;
         let boxH = box.h * scaleY;
-        let left = box.x * scaleX - boxW / 2;
-        let top  = box.y * scaleY - boxH / 2;
+        let left = (box.x * scaleX) - (boxW / 2);
+        let top  = (box.y * scaleY) - (boxH / 2);
 
         if (sessionIsFront) { left = canvas.width - left - boxW; }
 
@@ -396,5 +402,4 @@ function setStatus(type, msg) {
     statusDiv.innerHTML = msg;
 }
 
-// ── Boot ───────────────────────────────────────────────────
 initBackend().then(() => loadModel());
