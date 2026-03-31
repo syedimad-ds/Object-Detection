@@ -1,5 +1,5 @@
 // ============================================================
-//  EDGE AI — Object Detection | ADAPTIVE DYNAMIC RESOLUTION + HIGH ACCURACY (LETTERBOXING)
+//  EDGE AI — Object Detection | THE ULTIMATE OPTIMIZED VERSION
 // ============================================================
 
 const video          = document.getElementById('webcam');
@@ -16,10 +16,9 @@ const modelIndicator = document.getElementById('modelIndicator');
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
 
-// ── DYNAMIC RESOLUTION STATE ─────────────
-let isHDMode = !isMobile; 
+// ── DYNAMIC RESOLUTION STATE ───────────────────────────────
+let isHDMode = !isMobile; // Mobile pe Nano(320), Laptop pe Small(640)
 
-// 320x320 for Mobile (Nano), 640x640 for Laptop/HD (Small)
 let INPUT_W = isHDMode ? 640 : 320;
 let INPUT_H = isHDMode ? 640 : 320;
 
@@ -43,10 +42,10 @@ let fpsLastTime = performance.now();
 const modelPathNano  = './yolov8n_web_model/model.json'; 
 const modelPathSmall = './yolov8s_web_model/model.json'; 
 
-// ACCURACY TWEAK: Slightly lower threshold for mobile to catch more objects
-const CONF_THRESHOLD = isMobile ? 0.50 : 0.55; // Sirf 50%+ sure objects dikhayega
-const IOU_THRESHOLD  = 0.35; // Ek object par banne wale duplicate boxes ko strongly hatayega
-const MAX_DETECTIONS = 10;
+// ── STRICT AI TUNING (To remove noise & overlapping) ───────
+const CONF_THRESHOLD = isMobile ? 0.50 : 0.55; // Sirf 50%+ confident objects
+const IOU_THRESHOLD  = 0.35;                   // Overlapping boxes ko sakhti se merge karega
+const MAX_DETECTIONS = 10;                     // Screen par ek baar mein max 10 objects
 
 const COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
@@ -68,6 +67,7 @@ const CLASS_COLORS = [
 ];
 const getColor = id => CLASS_COLORS[id % CLASS_COLORS.length];
 
+// ── WebGL Initialization ───────────────────────────────────
 async function initBackend() {
     try {
         await tf.setBackend('webgl');
@@ -92,6 +92,7 @@ async function initBackend() {
     console.log(`✅ Backend Active: ${backendName}`);
 }
 
+// ── Model Setup ────────────────────────────────────────────
 async function loadModel() {
     try {
         setStatus('loading', `⏳ Initializing ${backendName}...`);
@@ -120,6 +121,7 @@ async function loadModel() {
     }
 }
 
+// ── Dynamic Resolution Toggle ──────────────────────────────
 if (hdModeBtn) {
     if (isHDMode) hdModeBtn.classList.add('active');
 
@@ -139,6 +141,7 @@ if (hdModeBtn) {
     });
 }
 
+// ── Camera Pipeline ────────────────────────────────────────
 async function startWebcam() {
     streamActive = false;
     inferenceRunning = false;
@@ -189,6 +192,7 @@ if (switchCamBtn) {
     });
 }
 
+// ── Video Render Loop (60 FPS) ─────────────────────────────
 function startRenderLoop() {
     function frame() {
         if (!streamActive) return;
@@ -219,6 +223,7 @@ function startRenderLoop() {
     renderLoopId = requestAnimationFrame(frame);
 }
 
+// ── Heavy AI Inference Engine (GPU Bound) ──────────────────
 async function runInferenceLoop() {
     while (streamActive) {
         if (!model || video.readyState < 2 || inferenceRunning) {
@@ -229,7 +234,7 @@ async function runInferenceLoop() {
         inferenceRunning = true;
 
         try {
-            // ACCURACY FIX: Letterboxing instead of Squashing
+            // STEP 1: Letterboxing (Aspect Ratio Maintain)
             const vidW = video.videoWidth;
             const vidH = video.videoHeight;
             const scale = Math.min(INPUT_W / vidW, INPUT_H / vidH);
@@ -238,11 +243,11 @@ async function runInferenceLoop() {
             const padX = (INPUT_W - drawW) / 2;
             const padY = (INPUT_H - drawH) / 2;
 
-            // Fill with standard YOLO padding color (RGB 114, 114, 114)
             processCtx.fillStyle = '#727272'; 
             processCtx.fillRect(0, 0, INPUT_W, INPUT_H);
             processCtx.drawImage(video, 0, 0, vidW, vidH, padX, padY, drawW, drawH);
 
+            // STEP 2: Tensor Operations
             const { nmsBoxes, maxScores, classIds } = tf.tidy(() => {
                 const inputTensor = tf.browser.fromPixels(processCanvas)
                     .expandDims(0)
@@ -283,10 +288,12 @@ async function runInferenceLoop() {
                 return { nmsBoxes: tfNmsBoxes, maxScores: tfMaxScores, classIds: tfClassIds };
             });
 
+            // STEP 3: NMS Filtering on GPU
             const selectedIndicesTensor = await tf.image.nonMaxSuppressionAsync(
                 nmsBoxes, maxScores, MAX_DETECTIONS, IOU_THRESHOLD, CONF_THRESHOLD
             );
 
+            // STEP 4: Memory Safe Data Extraction
             const indicesArr = await selectedIndicesTensor.data();
             const boxesFlat = await nmsBoxes.data();
             const scoresFlat = await maxScores.data();
@@ -311,7 +318,7 @@ async function runInferenceLoop() {
                     cx *= INPUT_W; cy *= INPUT_H; w *= INPUT_W; h *= INPUT_H; 
                 }
 
-                // ACCURACY FIX: Re-map coordinates back from Letterboxed 320x320 to Native Video dimensions
+                // STEP 5: Reverse Letterboxing (Map to original video space)
                 cx = (cx - padX) / scale;
                 cy = (cy - padY) / scale;
                 w = w / scale;
@@ -338,16 +345,17 @@ async function runInferenceLoop() {
         }
 
         inferenceRunning = false;
-
+        
+        // Throttling for thermal control
         const coolingDelay = isMobile ? 60 : 10; 
         await new Promise(resolve => setTimeout(resolve, coolingDelay)); 
     }
 }
 
+// ── Canvas Drawing Logic ───────────────────────────────────
 function drawBoxes(boxes) {
     if (!boxes.length) return;
 
-    // Use native video dimensions mapping since boxes are now reversed from letterbox padding
     const scaleX = canvas.width  / video.videoWidth;
     const scaleY = canvas.height / video.videoHeight;
 
@@ -402,4 +410,5 @@ function setStatus(type, msg) {
     statusDiv.innerHTML = msg;
 }
 
+// ── Start Engine ───────────────────────────────────────────
 initBackend().then(() => loadModel());
