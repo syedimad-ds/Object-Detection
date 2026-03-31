@@ -44,9 +44,9 @@ const modelPathNano  = './yolov8n_web_model/model.json';
 const modelPathSmall = './yolov8s_web_model/model.json'; 
 
 // ACCURACY TWEAK: Slightly lower threshold for mobile to catch more objects
-const CONF_THRESHOLD = isMobile ? 0.30 : 0.40;
-const IOU_THRESHOLD  = 0.45;
-const MAX_DETECTIONS = 15;
+const CONF_THRESHOLD = isMobile ? 0.50 : 0.55; // Sirf 50%+ sure objects dikhayega
+const IOU_THRESHOLD  = 0.35; // Ek object par banne wale duplicate boxes ko strongly hatayega
+const MAX_DETECTIONS = 10;
 
 const COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
