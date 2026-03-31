@@ -1,68 +1,43 @@
 // ============================================================
-//  EDGE AI — Object Detection Engine  (fully corrected)
-//
-//  Root causes fixed in this version:
-//
-//  FIX A — Shape parsing was INVERTED:
-//    model.execute() on this TF.js graph model returns shape
-//    [1, 84, 8400].  shape[1]=84, shape[2]=8400.
-//    The old condition (shape[1] > shape[2]) → 84 > 8400 → FALSE
-//    so it fell into the WRONG branch, treating data as [1,8400,84].
-//    That read coordinates as class scores and vice-versa,
-//    producing "Object 615 1%" and boxes in the wrong corner.
-//    Fix: detect layout by checking which dim equals 8400 explicitly,
-//    with a safe fallback.
-//
-//  FIX B — isFront was false on laptop:
-//    Laptop webcams are FRONT-facing. Setting isFront=false meant
-//    no mirror on the video AND no coordinate mirror on boxes,
-//    so everything was backwards. Fix: isFront = !isMobile on
-//    laptop (always mirror), mobile only mirrors on 'user' facingMode.
-//
-//  FIX C — Canvas race condition (previous fix retained):
-//    renderLoopId tracked and cancelled before new session starts.
-//    Canvas sized before video.play() so it's never 0.
+// CORE ELEMENTS
 // ============================================================
-
-// ── DOM refs ───────────────────────────────────────────────
-const video          = document.getElementById('webcam');
-const canvas         = document.getElementById('output_canvas');
-const ctx            = canvas.getContext('2d');
-const statusDiv      = document.getElementById('status');
-const switchCamBtn   = document.getElementById('switchCamBtn');
-const fpsDisplay     = document.getElementById('fpsDisplay');
+const video = document.getElementById('webcam');
+const canvas = document.getElementById('output_canvas');
+const ctx = canvas.getContext('2d');
+const statusDiv = document.getElementById('status');
+const switchCamBtn = document.getElementById('switchCamBtn');
+const fpsDisplay = document.getElementById('fpsDisplay');
 const detectionCount = document.getElementById('detectionCount');
 
-// ── State ──────────────────────────────────────────────────
-let model             = null;
+let model;
 let currentFacingMode = 'environment';
-let streamActive      = false;
-let inferenceRunning  = false;
-let lastBoxes         = [];
-let renderLoopId      = null;
+let animationFrameId = null;
+let isDetecting = false;
+let lastFrameTime = performance.now();
+let frameCount = 0;
+let fps = 0;
 
-// ── FPS ────────────────────────────────────────────────────
-let fpsFrameCount = 0;
-let fpsLastTime   = performance.now();
-
-// ── Device detection ───────────────────────────────────────
+// ============================================================
+// DEVICE DETECTION
+// ============================================================
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
-if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
+if (!isMobile && switchCamBtn) {
+    switchCamBtn.style.display = 'none';
+}
 
 const modelPath = isMobile
     ? './yolov8n_web_model/model.json'
     : './yolov8s_web_model/model.json';
 
-// ── Tuning ─────────────────────────────────────────────────
-const CONF_THRESHOLD = isMobile ? 0.40 : 0.45;
-const IOU_THRESHOLD  = 0.35;
-const MAX_DETECTIONS = 12;
+const CONF_THRESHOLD = isMobile ? 0.28 : 0.38;
+const IOU_THRESHOLD  = 0.40;
 const INPUT_SIZE     = 640;
-const NUM_CLASSES    = 80;   // COCO — hard-coded, no guessing from shape
 
-// ── Class names (80 COCO) ──────────────────────────────────
-const COCO_CLASSES = [
+// ============================================================
+// YOLO CLASS NAMES & COLORS
+// ============================================================
+const yoloClasses = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
     'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat',
     'dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack',
@@ -73,439 +48,391 @@ const COCO_CLASSES = [
     'couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote',
     'keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book',
     'clock','vase','scissors','teddy bear','hair drier','toothbrush'
-];   // exactly 80 entries
+];
 
-const CLASS_COLORS = [
+const classColors = [
     '#FF3838','#FF9D97','#FF701F','#FFB21D','#CFD231','#48F90A','#92CC17','#3DDB86',
     '#1A9334','#00D4BB','#2C99A8','#00C2FF','#344593','#6473FF','#0018EC','#8438FF',
     '#520085','#CB38FF','#FF95C8','#FF37C7'
 ];
 
-const getColor = id => CLASS_COLORS[Math.abs(id) % CLASS_COLORS.length];
-
-// ── IOU ────────────────────────────────────────────────────
-function iouScore(a, b) {
-    const aL = a.cx - a.w / 2,  aR = a.cx + a.w / 2;
-    const aT = a.cy - a.h / 2,  aB = a.cy + a.h / 2;
-    const bL = b.cx - b.w / 2,  bR = b.cx + b.w / 2;
-    const bT = b.cy - b.h / 2,  bB = b.cy + b.h / 2;
-    const iW = Math.max(0, Math.min(aR, bR) - Math.max(aL, bL));
-    const iH = Math.max(0, Math.min(aB, bB) - Math.max(aT, bT));
-    const inter = iW * iH;
-    const union = a.w * a.h + b.w * b.h - inter;
-    return union > 0 ? inter / union : 0;
+function getColor(classId) {
+    return classColors[classId % classColors.length];
 }
 
-// ── Cross-class NMS ────────────────────────────────────────
-function nms(candidates) {
-    candidates.sort((a, b) => b.conf - a.conf);
-    const suppressed = new Uint8Array(candidates.length);
-    const keep = [];
-    for (let i = 0; i < candidates.length; i++) {
-        if (suppressed[i]) continue;
-        keep.push(candidates[i]);
-        if (keep.length >= MAX_DETECTIONS) break;
-        for (let j = i + 1; j < candidates.length; j++) {
-            if (suppressed[j]) continue;
-            if (candidates[i].classId === candidates[j].classId ||
-                iouScore(candidates[i], candidates[j]) > IOU_THRESHOLD) {
-                suppressed[j] = 1;
-            }
-        }
-    }
-    return keep;
+// ============================================================
+// BUG FIX #1: CORRECT IOU CALCULATION (b2 vars were missing!)
+// ============================================================
+function calculateIOU(box1, box2) {
+    const b1Left   = box1.x - box1.w / 2;
+    const b1Right  = box1.x + box1.w / 2;
+    const b1Top    = box1.y - box1.h / 2;
+    const b1Bottom = box1.y + box1.h / 2;
+
+    const b2Left   = box2.x - box2.w / 2;
+    const b2Right  = box2.x + box2.w / 2;
+    const b2Top    = box2.y - box2.h / 2;
+    const b2Bottom = box2.y + box2.h / 2;
+
+    const xA = Math.max(b1Left, b2Left);
+    const yA = Math.max(b1Top, b2Top);
+    const xB = Math.min(b1Right, b2Right);
+    const yB = Math.min(b1Bottom, b2Bottom);
+
+    const intersectionArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+    const unionArea = (box1.w * box1.h) + (box2.w * box2.h) - intersectionArea;
+
+    if (unionArea === 0) return 0;
+    return intersectionArea / unionArea;
 }
 
-// ── Model loading ──────────────────────────────────────────
+// ============================================================
+// MODEL LOADING
+// ============================================================
 async function loadModel() {
     try {
-        setStatus('loading', '⏳ Initializing WebGL...');
+        setStatus('loading', '⏳ Initializing WebGL backend...');
+
+        // Force WebGL for GPU acceleration
         await tf.setBackend('webgl');
         await tf.ready();
-        tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 0);
-        tf.env().set('WEBGL_PACK', true);
-        tf.env().set('WEBGL_CONV_IM2COL', true);
 
-        setStatus('loading', '⏳ Downloading model...');
+        // Enable memory optimizations
+        tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 0);
+        tf.env().set('WEBGL_FLUSH_THRESHOLD', -1);
+
+        setStatus('loading', '⏳ Downloading model weights...');
         model = await tf.loadGraphModel(modelPath);
 
-        // Warm-up: compiles GPU shaders so first real frame is instant
-        setStatus('loading', '🔥 Warming up GPU (~5s)...');
-        const dummy = tf.zeros([1, INPUT_SIZE, INPUT_SIZE, 3]);
-        let warmOut;
-        try   { warmOut = model.execute(dummy); }
-        catch { warmOut = await model.executeAsync(dummy); }
-        if (Array.isArray(warmOut)) warmOut.forEach(t => t.dispose());
-        else warmOut.dispose();
-        dummy.dispose();
+        // BUG FIX #2: Warm-up with actual inference size so the GPU compiles
+        // shaders properly — this is what causes the 1-2 min freeze on first frame
+        setStatus('loading', '🔥 Warming up GPU shaders (one-time, ~10s)...');
+        const warmupTensor = tf.zeros([1, INPUT_SIZE, INPUT_SIZE, 3]);
+        const warmupResult = await model.executeAsync(warmupTensor);
+        // Properly dispose array of tensors or single tensor
+        if (Array.isArray(warmupResult)) {
+            warmupResult.forEach(t => t.dispose());
+        } else {
+            warmupResult.dispose();
+        }
+        warmupTensor.dispose();
 
-        const label = isMobile ? 'Nano · Fast Mode' : 'Small · High Accuracy';
-        setStatus('active', `✅ System Active — ${label}`);
-        await startWebcam();
+        const modeLabel = isMobile ? 'Nano · Fast Mode' : 'Small · High Accuracy';
+        setStatus('active', `✅ System Active — ${modeLabel}`);
 
+        startWebcam();
     } catch (err) {
-        setStatus('error', `❌ Load failed: ${err.message}`);
+        setStatus('error', `❌ Model load failed: ${err.message}`);
         console.error(err);
     }
 }
 
-// ── Webcam ─────────────────────────────────────────────────
+// ============================================================
+// WEBCAM
+// ============================================================
 async function startWebcam() {
-    // Stop old loops before touching the stream
-    streamActive     = false;
-    inferenceRunning = false;
-    lastBoxes        = [];
-
-    if (renderLoopId !== null) {
-        cancelAnimationFrame(renderLoopId);
-        renderLoopId = null;
-    }
-
+    // Stop any existing stream
     if (video.srcObject) {
         video.srcObject.getTracks().forEach(t => t.stop());
         video.srcObject = null;
     }
 
-    // Let any queued rAF callbacks drain before starting fresh
-    await waitFrame();
-    await waitFrame();
+    // Cancel existing detection loop while switching
+    isDetecting = false;
+    if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+    }
 
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const constraints = {
             video: {
                 facingMode: isMobile ? currentFacingMode : 'user',
-                width:      { ideal: 1280 },
-                height:     { ideal: 720  },
-                frameRate:  { ideal: 30   }
+                width:  { ideal: 1280 },
+                height: { ideal: 720 }
             }
-        });
-
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = stream;
-        await new Promise(resolve => { video.onloadedmetadata = resolve; });
 
-        // Set canvas size while dimensions are known, before play()
-        canvas.width  = video.videoWidth  || 640;
-        canvas.height = video.videoHeight || 480;
-
+        await new Promise(resolve => {
+            video.onloadedmetadata = resolve;
+        });
         await video.play();
 
-        // ── FIX B: isFront logic ──────────────────────────
-        // Laptop: always front-facing (mirror video + mirror boxes)
-        // Mobile: mirror only when using selfie cam
-        const isFront = isMobile
-            ? (currentFacingMode === 'user')
-            : true;   // laptop webcam is always front-facing
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
 
-        streamActive = true;
-        startRenderLoop(isFront);
-        runInferenceLoop(isFront);
+        isDetecting = true;
+        detectFrame();
 
     } catch (err) {
-        setStatus('error', '❌ Camera denied — check browser permissions.');
+        setStatus('error', '❌ Camera access denied. Please allow permissions.');
         console.error(err);
     }
 }
 
-// Camera switch (mobile only)
+// Camera switch button
 if (switchCamBtn) {
     switchCamBtn.addEventListener('click', async () => {
         if (!isMobile) return;
         currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
         switchCamBtn.disabled = true;
+        switchCamBtn.innerText = '🔄 Switching...';
         await startWebcam();
         switchCamBtn.disabled = false;
+        switchCamBtn.innerText = '🔄 Switch Camera';
     });
 }
 
 // ============================================================
-//  RENDER LOOP — 60 fps, never waits for inference
+// FPS TRACKER
 // ============================================================
-function startRenderLoop(isFront) {
-    function frame() {
-        if (!streamActive) return;
+function updateFPS() {
+    frameCount++;
+    const now = performance.now();
+    const delta = now - lastFrameTime;
+    if (delta >= 1000) {
+        fps = Math.round((frameCount * 1000) / delta);
+        frameCount = 0;
+        lastFrameTime = now;
+        if (fpsDisplay) fpsDisplay.textContent = `${fps} FPS`;
+    }
+}
 
-        // Always clear to avoid ghost frames if video stalls
+// ============================================================
+// MAIN DETECTION LOOP
+// BUG FIX #3: Use typed array (data()) not .array() — 10-50x faster
+// BUG FIX #4: Proper tensor disposal for arrays of tensors
+// BUG FIX #5: Bounding box mirror logic unified and correct
+// ============================================================
+async function detectFrame() {
+    if (!isDetecting) return;
+
+    // Don't run inference if video isn't ready
+    if (video.readyState < 2) {
+        animationFrameId = requestAnimationFrame(detectFrame);
+        return;
+    }
+
+    const isFrontCam = currentFacingMode === 'user' || !isMobile;
+
+    // ---- Preprocessing: build input tensor inside tf.tidy ----
+    const inputTensor = tf.tidy(() => {
+        return tf.browser.fromPixels(video)
+            .resizeBilinear([INPUT_SIZE, INPUT_SIZE])
+            .expandDims(0)
+            .toFloat()
+            .div(255.0);
+    });
+
+    let rawOutput = null;
+
+    try {
+        rawOutput = await model.executeAsync(inputTensor);
+
+        // Normalize output to always be a single tensor
+        const outputTensor = Array.isArray(rawOutput) ? rawOutput[0] : rawOutput;
+        const shape = outputTensor.shape;
+
+        // BUG FIX #3: Use .data() (Float32Array) instead of .array() — massively faster
+        const flatData = await outputTensor.data();
+
+        // ---- Parse detections based on output shape ----
+        let candidates = [];
+
+        if (shape.length === 3 && (shape[1] === 84 || shape[1] === 80)) {
+            // Shape: [1, 84, 8400] — columns are boxes
+            const numClasses = shape[1] - 4;
+            const numBoxes   = shape[2];
+
+            for (let col = 0; col < numBoxes; col++) {
+                let maxConf = 0;
+                let classId = -1;
+
+                for (let cls = 0; cls < numClasses; cls++) {
+                    // Index: (cls+4) * numBoxes + col
+                    const conf = flatData[(cls + 4) * numBoxes + col];
+                    if (conf > maxConf) {
+                        maxConf = conf;
+                        classId = cls;
+                    }
+                }
+
+                if (maxConf > CONF_THRESHOLD) {
+                    candidates.push({
+                        x:       flatData[0 * numBoxes + col],
+                        y:       flatData[1 * numBoxes + col],
+                        w:       flatData[2 * numBoxes + col],
+                        h:       flatData[3 * numBoxes + col],
+                        conf:    maxConf,
+                        classId: classId
+                    });
+                }
+            }
+
+        } else if (shape.length === 3 && (shape[2] === 84 || shape[2] === 80)) {
+            // Shape: [1, 8400, 84] — rows are boxes
+            const numBoxes   = shape[1];
+            const numCols    = shape[2];
+            const numClasses = numCols - 4;
+
+            for (let row = 0; row < numBoxes; row++) {
+                const base = row * numCols;
+                let maxConf = 0;
+                let classId = -1;
+
+                for (let cls = 0; cls < numClasses; cls++) {
+                    const conf = flatData[base + 4 + cls];
+                    if (conf > maxConf) {
+                        maxConf = conf;
+                        classId = cls;
+                    }
+                }
+
+                if (maxConf > CONF_THRESHOLD) {
+                    candidates.push({
+                        x:       flatData[base + 0],
+                        y:       flatData[base + 1],
+                        w:       flatData[base + 2],
+                        h:       flatData[base + 3],
+                        conf:    maxConf,
+                        classId: classId
+                    });
+                }
+            }
+        }
+
+        // ---- Non-Maximum Suppression ----
+        candidates.sort((a, b) => b.conf - a.conf);
+        const finalBoxes = [];
+
+        while (candidates.length > 0) {
+            const best = candidates.shift();
+            finalBoxes.push(best);
+            candidates = candidates.filter(box =>
+                box.classId !== best.classId || calculateIOU(best, box) < IOU_THRESHOLD
+            );
+        }
+
+        // ---- Draw: video frame first ----
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        if (video.readyState >= 2) {
-            if (isFront) {
-                ctx.save();
-                ctx.translate(canvas.width, 0);
-                ctx.scale(-1, 1);
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                ctx.restore();
-            } else {
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            }
-        }
-
-        drawBoxes(lastBoxes, isFront);
-
-        // FPS
-        fpsFrameCount++;
-        const now = performance.now();
-        if (now - fpsLastTime >= 1000) {
-            if (fpsDisplay) fpsDisplay.textContent =
-                Math.round((fpsFrameCount * 1000) / (now - fpsLastTime));
-            fpsFrameCount = 0;
-            fpsLastTime   = now;
-        }
-
-        renderLoopId = requestAnimationFrame(frame);
-    }
-    renderLoopId = requestAnimationFrame(frame);
-}
-
-// ============================================================
-//  INFERENCE LOOP — runs as fast as GPU allows
-// ============================================================
-async function runInferenceLoop(isFront) {
-    while (streamActive) {
-        if (!model || video.readyState < 2 || inferenceRunning) {
-            await waitFrame();
-            continue;
-        }
-
-        inferenceRunning = true;
-
-        try {
-            const inputTensor = tf.tidy(() =>
-                tf.browser.fromPixels(video)
-                    .resizeBilinear([INPUT_SIZE, INPUT_SIZE])
-                    .expandDims(0)
-                    .toFloat()
-                    .div(255.0)
-            );
-
-            let rawOut;
-            try   { rawOut = model.execute(inputTensor); }
-            catch { rawOut = await model.executeAsync(inputTensor); }
-            inputTensor.dispose();
-
-            const outTensor = Array.isArray(rawOut) ? rawOut[0] : rawOut;
-            const shape     = outTensor.shape;        // e.g. [1, 84, 8400]
-            const flatData  = await outTensor.data(); // Float32Array
-
-            if (Array.isArray(rawOut)) rawOut.forEach(t => t.dispose());
-            else rawOut.dispose();
-
-            // ── FIX A: parse with explicit layout detection ──
-            const candidates = parseDetections(flatData, shape);
-            lastBoxes = nms(candidates);
-
-            if (lastBoxes.length > 0) {
-                setStatus('active',
-                    `🟢 ${lastBoxes.length} object${lastBoxes.length !== 1 ? 's' : ''} detected`);
-                if (detectionCount) detectionCount.textContent = lastBoxes.length;
-            } else {
-                setStatus('scanning', '📡 Scanning...');
-                if (detectionCount) detectionCount.textContent = '0';
-            }
-
-        } catch (err) {
-            console.warn('Inference error:', err.message);
-        }
-
-        inferenceRunning = false;
-        await waitFrame();
-    }
-}
-
-// ============================================================
-//  PARSE DETECTIONS
-//
-//  YOLOv8 TF.js output is ALWAYS [1, 84, 8400]:
-//    - dim 1 = 84  = 4 box coords + 80 class scores (rows)
-//    - dim 2 = 8400 = number of candidate boxes (columns)
-//
-//  Memory layout (row-major, batch=1 squeezed):
-//    index = row * 8400 + col
-//    row 0 → cx for all 8400 boxes
-//    row 1 → cy for all 8400 boxes
-//    row 2 → w  for all 8400 boxes
-//    row 3 → h  for all 8400 boxes
-//    row 4..83 → class scores for all 8400 boxes
-//
-//  The old code used (shape[1] > shape[2]) which is 84>8400=false
-//  so it fell into the WRONG branch every time.
-//  We now detect layout by checking which dimension equals
-//  NUM_BOXES (8400) and which equals NUM_CLASSES+4 (84).
-// ============================================================
-function parseDetections(flatData, shape) {
-    const candidates = [];
-
-    if (!shape || shape.length < 2) return candidates;
-
-    // Strip leading batch dimension if present
-    const dims = shape.length === 3 ? [shape[1], shape[2]] : [shape[0], shape[1]];
-
-    // Figure out which dimension is "channels" (84) and which is "boxes" (8400)
-    // channels = NUM_CLASSES + 4 = 84
-    // We identify by size: the smaller dim is channels, larger is boxes
-    // Both must be sane values — guard against weird shapes
-    const CHANNELS = NUM_CLASSES + 4;  // 84
-
-    let numChannels, numBoxes;
-
-    if (dims[0] === CHANNELS) {
-        // Layout [84, 8400] — standard YOLOv8 TF.js output
-        numChannels = dims[0];
-        numBoxes    = dims[1];
-    } else if (dims[1] === CHANNELS) {
-        // Layout [8400, 84] — transposed
-        numBoxes    = dims[0];
-        numChannels = dims[1];
-    } else {
-        // Unexpected shape — try to recover by treating smaller as channels
-        if (dims[0] < dims[1]) {
-            numChannels = dims[0];
-            numBoxes    = dims[1];
-        } else {
-            numBoxes    = dims[0];
-            numChannels = dims[1];
-        }
-        console.warn('Unexpected output shape:', shape, '— guessing layout');
-    }
-
-    const numClasses = numChannels - 4;  // should be 80
-
-    // Safety check: classId must stay within COCO_CLASSES array
-    if (numClasses <= 0 || numClasses > 200) {
-        console.error('Parsed numClasses is invalid:', numClasses, 'from shape:', shape);
-        return candidates;
-    }
-
-    if (dims[0] === CHANNELS || (dims[0] < dims[1] && dims[0] !== numBoxes)) {
-        // ── Layout [channels, boxes] = [84, 8400] ──────────
-        // index formula: flatData[row * numBoxes + col]
-        for (let col = 0; col < numBoxes; col++) {
-            let maxConf = 0, classId = -1;
-            for (let cls = 0; cls < numClasses; cls++) {
-                const conf = flatData[(4 + cls) * numBoxes + col];
-                if (conf > maxConf) { maxConf = conf; classId = cls; }
-            }
-            if (maxConf >= CONF_THRESHOLD && classId >= 0 && classId < COCO_CLASSES.length) {
-                candidates.push({
-                    cx:      flatData[0 * numBoxes + col],
-                    cy:      flatData[1 * numBoxes + col],
-                    w:       flatData[2 * numBoxes + col],
-                    h:       flatData[3 * numBoxes + col],
-                    conf:    maxConf,
-                    classId: classId
-                });
-            }
-        }
-    } else {
-        // ── Layout [boxes, channels] = [8400, 84] ──────────
-        // index formula: flatData[row * numChannels + col]
-        for (let row = 0; row < numBoxes; row++) {
-            const base = row * numChannels;
-            let maxConf = 0, classId = -1;
-            for (let cls = 0; cls < numClasses; cls++) {
-                const conf = flatData[base + 4 + cls];
-                if (conf > maxConf) { maxConf = conf; classId = cls; }
-            }
-            if (maxConf >= CONF_THRESHOLD && classId >= 0 && classId < COCO_CLASSES.length) {
-                candidates.push({
-                    cx:      flatData[base + 0],
-                    cy:      flatData[base + 1],
-                    w:       flatData[base + 2],
-                    h:       flatData[base + 3],
-                    conf:    maxConf,
-                    classId: classId
-                });
-            }
-        }
-    }
-
-    return candidates;
-}
-
-// ── Draw boxes ─────────────────────────────────────────────
-function drawBoxes(boxes, isFront) {
-    if (!boxes.length) return;
-
-    const sx = canvas.width  / INPUT_SIZE;
-    const sy = canvas.height / INPUT_SIZE;
-
-    boxes.forEach(box => {
-        const color = getColor(box.classId);
-        const name  = (box.classId >= 0 && box.classId < COCO_CLASSES.length)
-            ? COCO_CLASSES[box.classId]
-            : 'Object';
-        const label = `${name} ${Math.round(box.conf * 100)}%`;
-
-        // box coords are in [0, INPUT_SIZE] space (cx, cy, w, h)
-        let { cx, cy, w, h } = box;
-
-        // Scale to canvas pixels
-        let left = (cx - w / 2) * sx;
-        let top  = (cy - h / 2) * sy;
-        const bw = w * sx;
-        const bh = h * sy;
-
-        // Mirror X coordinate for front camera
-        if (isFront) left = canvas.width - left - bw;
-
-        // Clamp to canvas bounds
-        left = Math.max(0, Math.min(left, canvas.width  - 1));
-        top  = Math.max(0, Math.min(top,  canvas.height - 1));
-
+        // BUG FIX #5: Mirror the canvas for front cam so it looks natural
         ctx.save();
-
-        // Bounding box
-        ctx.strokeStyle = color;
-        ctx.lineWidth   = 2;
-        ctx.shadowColor = color;
-        ctx.shadowBlur  = 6;
-        ctx.strokeRect(left, top, bw, bh);
-
-        // Corner brackets (tactical style)
-        const c = Math.max(6, Math.min(16, bw * 0.15, bh * 0.15));
-        ctx.lineWidth  = 3;
-        ctx.shadowBlur = 0;
-        ctx.beginPath();
-        // top-left
-        ctx.moveTo(left,          top + c);      ctx.lineTo(left,          top);
-        ctx.lineTo(left + c,      top);
-        // top-right
-        ctx.moveTo(left + bw - c, top);          ctx.lineTo(left + bw,     top);
-        ctx.lineTo(left + bw,     top + c);
-        // bottom-left
-        ctx.moveTo(left,          top + bh - c); ctx.lineTo(left,          top + bh);
-        ctx.lineTo(left + c,      top + bh);
-        // bottom-right
-        ctx.moveTo(left + bw - c, top + bh);     ctx.lineTo(left + bw,     top + bh);
-        ctx.lineTo(left + bw,     top + bh - c);
-        ctx.stroke();
-
-        // Label pill
-        ctx.font = 'bold 12px "Outfit", sans-serif';
-        const tw = ctx.measureText(label).width;
-        const ph = 20, px = 7;
-        // Keep label inside canvas horizontally
-        const lx = Math.max(0, Math.min(left, canvas.width  - tw - px * 2 - 1));
-        const ly = top > ph + 4 ? top - ph - 3 : top + 3;
-
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.roundRect(lx, ly, tw + px * 2, ph, 5);
-        ctx.fill();
-
-        ctx.fillStyle = '#000';
-        ctx.fillText(label, lx + px, ly + ph - 5);
-
+        if (isFrontCam) {
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+        }
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         ctx.restore();
-    });
+
+        // ---- Draw detections ----
+        const scaleX = canvas.width  / INPUT_SIZE;
+        const scaleY = canvas.height / INPUT_SIZE;
+
+        finalBoxes.forEach(box => {
+            const color = getColor(box.classId);
+            const label = `${yoloClasses[box.classId] || 'Object'} ${(box.conf * 100).toFixed(0)}%`;
+
+            let { x, y, w, h } = box;
+
+            // Handle un-normalized coordinates (rare but possible)
+            if (w <= 2.0 && h <= 2.0) {
+                x *= INPUT_SIZE; y *= INPUT_SIZE;
+                w *= INPUT_SIZE; h *= INPUT_SIZE;
+            }
+
+            let left = (x - w / 2) * scaleX;
+            let top  = (y - h / 2) * scaleY;
+            const boxW = w * scaleX;
+            const boxH = h * scaleY;
+
+            // BUG FIX #5: Mirror box X for front camera
+            if (isFrontCam) {
+                left = canvas.width - left - boxW;
+            }
+
+            // Bounding box
+            ctx.shadowColor = color;
+            ctx.shadowBlur  = 10;
+            ctx.strokeStyle = color;
+            ctx.lineWidth   = 2.5;
+            ctx.strokeRect(left, top, boxW, boxH);
+
+            // Corner accent markers
+            const corner = 14;
+            ctx.lineWidth = 4;
+            // Top-left
+            ctx.beginPath(); ctx.moveTo(left, top + corner); ctx.lineTo(left, top); ctx.lineTo(left + corner, top); ctx.stroke();
+            // Top-right
+            ctx.beginPath(); ctx.moveTo(left + boxW - corner, top); ctx.lineTo(left + boxW, top); ctx.lineTo(left + boxW, top + corner); ctx.stroke();
+            // Bottom-left
+            ctx.beginPath(); ctx.moveTo(left, top + boxH - corner); ctx.lineTo(left, top + boxH); ctx.lineTo(left + corner, top + boxH); ctx.stroke();
+            // Bottom-right
+            ctx.beginPath(); ctx.moveTo(left + boxW - corner, top + boxH); ctx.lineTo(left + boxW, top + boxH); ctx.lineTo(left + boxW, top + boxH - corner); ctx.stroke();
+
+            ctx.shadowBlur = 0;
+
+            // Label background pill
+            ctx.font = 'bold 13px "Segoe UI", sans-serif';
+            const textW = ctx.measureText(label).width;
+            const padX = 8, padY = 4, labelH = 22;
+            const lx = Math.max(0, left);
+            const ly = top > labelH + 4 ? top - labelH - 4 : top + 4;
+
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.roundRect(lx, ly, textW + padX * 2, labelH, 6);
+            ctx.fill();
+
+            ctx.fillStyle = '#fff';
+            ctx.fillText(label, lx + padX, ly + labelH - padY);
+        });
+
+        // ---- Update UI ----
+        if (finalBoxes.length > 0) {
+            setStatus('active', `🟢 ${finalBoxes.length} object${finalBoxes.length > 1 ? 's' : ''} detected`);
+            if (detectionCount) detectionCount.textContent = finalBoxes.length;
+        } else {
+            setStatus('scanning', '📡 Scanning...');
+            if (detectionCount) detectionCount.textContent = '0';
+        }
+
+    } catch (err) {
+        // Silently continue the loop — don't crash on a single bad frame
+        console.warn('Frame error:', err.message);
+    } finally {
+        // BUG FIX #4: Always dispose properly
+        inputTensor.dispose();
+        if (rawOutput) {
+            if (Array.isArray(rawOutput)) {
+                rawOutput.forEach(t => t.dispose());
+            } else {
+                rawOutput.dispose();
+            }
+        }
+    }
+
+    updateFPS();
+
+    // Schedule next frame — no double-wait, just rAF
+    animationFrameId = requestAnimationFrame(detectFrame);
 }
 
-// ── Helpers ────────────────────────────────────────────────
-const waitFrame = () => new Promise(r => requestAnimationFrame(r));
-
-function setStatus(type, msg) {
-    statusDiv.className = `status-pill status-${type}`;
-    statusDiv.innerHTML = msg;
+// ============================================================
+// STATUS HELPER
+// ============================================================
+function setStatus(type, message) {
+    statusDiv.className = 'status-pill';
+    if (type === 'active')   statusDiv.classList.add('status-active');
+    if (type === 'loading')  statusDiv.classList.add('status-loading');
+    if (type === 'scanning') statusDiv.classList.add('status-scanning');
+    if (type === 'error')    statusDiv.classList.add('status-error');
+    statusDiv.innerHTML = message;
 }
 
-// ── Boot ───────────────────────────────────────────────────
+// ============================================================
+// START
+// ============================================================
 loadModel();
