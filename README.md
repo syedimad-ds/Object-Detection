@@ -27,71 +27,99 @@ Object-Detection/
 │
 ├── index.html                  # Main UI layout (Video & Canvas container)
 ├── style.css                   # Premium Dark Theme & UI styling
-├── script.js                   # Core AI Engine (Inference, NMS, Drawing)
+├── script.js                   # Core AI Engine (Inference, WebGL NMS, Letterboxing)
+├── Yolov8n_json.ipynb          # Jupyter Notebook for exporting Nano model to TF.js
+├── Yolov8s_json.ipynb          # Jupyter Notebook for exporting Small model to TF.js
+├── README.md                   # Project documentation
 │
-└── yolov8n_web_model/          # Exported TensorFlow.js Model Folder
-    ├── model.json              # Model architecture and graph topology
-    ├── metadata.yaml           # Class names and configuration
-    ├── group1-shard1of2.bin
-    ├── group1-shard1of6.bin
-    ├── group1-shard2of2.bin
-    ├── group1-shard2of6.bin
-    ├── group1-shard3of6.bin
-    ├── group1-shard4of6.bin
-    ├── group1-shard5of6.bin
-    └── group1-shard6of6.bin
+├── yolov8n_web_model/          # Exported TF.js Model for Mobile (320x320)
+│   ├── model.json              
+│   └── [shard .bin files...]
+│
+└── yolov8s_web_model/          # Exported TF.js Model for Desktop (640x640)
+    ├── model.json              
+    └── [shard .bin files...]
 ```
 ---
 
-## 📄 File Descriptions
+# 📄 File Descriptions
 
-| File / Folder            | Description |
-|--------------------------|------------|
-| `index.html`             | Handles webcam feed and UI layout |
-| `style.css`              | Cyberpunk-themed styling |
-| `script.js`              | Handles preprocessing, inference, and rendering |
-| `yolov8n_web_model/`     | Contains model weights and config files |
-
----
-
-## ✨ Key Features
-
-- **Multi-Object Detection** — Detects multiple objects in real time  
-- **NMS Integration** — Removes overlapping bounding boxes  
-- **Dynamic Color Labels** — Unique neon colors per class  
-- **Client-Side AI** — No server, ensuring full privacy  
-- **Real-Time Performance** — Optimized TensorFlow.js inference  
+| File / Folder | Description |
+|--------------|------------|
+| `index.html` | Handles webcam feed, UI layout, and HD Mode toggle |
+| `style.css` | Cyberpunk-themed styling and responsive UI |
+| `script.js` | Handles dynamic preprocessing, GPU inference, and canvas rendering |
+| `Yolov8n_json.ipynb` | Python script to convert and export YOLOv8-Nano model to TF.js format |
+| `Yolov8s_json.ipynb` | Python script to convert and export YOLOv8-Small model to TF.js format |
+| `yolov8n_web_model/` | Contains weights for lightweight Nano model (Mobile Default) |
+| `yolov8s_web_model/` | Contains weights for high-accuracy Small model (Desktop / HD Mode) |
 
 ---
 
-## 📉 Current Shortcomings & Technical Analysis
+# ✨ Key Features & Extreme Optimizations
+
+- **Adaptive Dynamic Resolution**
+  - Scales to `320×320` (YOLOv8n) on mobile for FPS
+  - Scales to `640×640` (YOLOv8s) on desktop for accuracy
+
+- **GPU-Accelerated NMS**
+  - Uses `tf.image.nonMaxSuppressionAsync`
+  - Runs on WebGL backend → avoids CPU bottlenecks & UI freezing
+
+- **Letterboxing for Accuracy**
+  - Preserves aspect ratio via padding
+  - Prevents distortion and improves confidence scores
+
+- **Universal Backend Fallback**
+  - Tries **WebGL (F16 pipelines)** → falls back to **WASM / CPU**
+  - Prevents crashes on unsupported devices
+
+- **Strict Noise Filtering**
+  - Confidence > 50%
+  - IOU < 35%
+  - Eliminates overlapping boxes & ghost detections
+
+- **Client-Side AI**
+  - No backend/server
+  - Full privacy with real-time performance
+
+---
+
+# 📉 Current Shortcomings & Technical Analysis
 
 ### 1. Classification Fluctuations (Flickering)
-- **Problem:** Objects like watches may be misclassified  
-- **Reason:** COCO dataset lacks certain classes → model predicts closest match  
-
-### 2. Accuracy vs Speed Trade-off
-- **Problem:** Small objects may be missed  
-- **Reason:** Frame resizing to **640×640** reduces fine spatial details  
-
-### 3. Hardware Dependency
-- **Problem:** FPS varies across devices  
-- **Reason:** Relies on WebGL; performance depends on GPU availability  
+- **Problem:** Objects (e.g., watches) may be misclassified  
+- **Reason:** COCO dataset lacks certain classes → predicts closest match  
 
 ---
 
-## 🚀 How to Run Locally
+### 2. Accuracy vs Speed Trade-off (Mobile vs Desktop)
+- **Problem:** Small/distant objects missed on mobile  
+- **Reason:**
+  - Mobile uses `320×320` input for 20–30 FPS
+  - Reduced spatial detail vs `640×640` desktop mode
 
-```text
-1.git clone https://github.com/syedimad-ds/Object-Detection.git
-2.cd Object-Detection
-3.Open using a local server (VS Code Live Server recommended)
-4.Allow camera permissions
-5.Start real-time object detection
-```
 ---
 
-## 🛣️ Future Roadmap
+### 3. Hardware Dependency & Thermal Throttling
+- **Problem:** FPS varies; mobile heating during long usage  
+- **Reason:**
+  - Heavy reliance on GPU via WebGL
+  - Higher overhead vs native (TFLite / NPU)
+  - Uses async throttling to reduce GC spikes
+
+---
+
+# 🚀 How to Run Locally
+
+1. git clone [Object-Detection Repository](https://github.com/syedimad-ds/Object-Detection.git)
+2. cd Object-Detection
+3. Open using a local server (VS Code Live Server recommended)
+4. Allow camera permissions
+5. Start real-time object detection
+
+
+# 🛣️ Future Roadmap
 
 - Custom model training (e.g., watches, electronics)  
 - WebGPU backend integration for faster inference  
@@ -99,24 +127,32 @@ Object-Detection/
 
 ---
 
-## 📊 Project Highlights (For Recruiters)
+# 📊 Project Highlights (For Recruiters)
 
 - ⚡ **Real-time Edge AI in Browser** — Zero backend dependency  
 - 🔒 **Privacy-first architecture** — No data leaves user device  
 - 🧠 **YOLOv8 + TensorFlow.js deployment**  
-- 🎯 **Optimized inference pipeline (NMS + preprocessing)**  
 
-### 💡 Demonstrates strong understanding of:
-- Computer Vision  
-- Deep Learning Deployment  
-- Web-based AI systems  
-- Performance optimization  
+### 🎯 Advanced Inference Pipeline
+- GPU-bound NMS  
+- Letterboxing  
+- Tensor slicing  
 
+### 📱 Adaptive Hardware Scaling
+- Dynamic memory & resolution based on device capability  
 
-## 👨‍💻 Author
+---
+
+# 💡 Demonstrates Strong Understanding Of
+
+- Computer Vision & Edge AI Deployment  
+- Memory Management & Performance Optimization  
+- Web-based AI Systems (WebGL / WASM)  
+- Hyperparameter Tuning (IOU / Confidence Thresholds)  
+
+---
+
+# 👨‍💻 Author
 
 **Syed Imad Muzaffar**  
-🎓 3rd Year B.E. Student — AI & Data Science
-
-
-
+🎓 3rd Year B.E. Student — AI & Data Science  
