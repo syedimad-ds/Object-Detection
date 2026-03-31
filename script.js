@@ -1,20 +1,30 @@
 // ============================================================
-//  EDGE AI — Object Detection Engine
+//  EDGE AI — Object Detection Engine  (fully corrected)
 //
-//  Black canvas fixes applied:
-//  1. Single render loop ID tracked — old loop cancelled before
-//     new one starts, preventing two loops fighting the canvas
-//  2. canvas dimensions set BEFORE video.play() is awaited,
-//     so width/height are never 0 when drawing starts
-//  3. isFront computed once per startWebcam call and stored in
-//     a closure variable — no per-frame recomputation that
-//     could be wrong during transitions
-//  4. ctx.clearRect added so stale frames don't persist when
-//     video stalls
-//  5. Laptop facingMode: 'user' means front cam — isFront must
-//     be true for laptop, handled by dedicated flag
+//  Root causes fixed in this version:
+//
+//  FIX A — Shape parsing was INVERTED:
+//    model.execute() on this TF.js graph model returns shape
+//    [1, 84, 8400].  shape[1]=84, shape[2]=8400.
+//    The old condition (shape[1] > shape[2]) → 84 > 8400 → FALSE
+//    so it fell into the WRONG branch, treating data as [1,8400,84].
+//    That read coordinates as class scores and vice-versa,
+//    producing "Object 615 1%" and boxes in the wrong corner.
+//    Fix: detect layout by checking which dim equals 8400 explicitly,
+//    with a safe fallback.
+//
+//  FIX B — isFront was false on laptop:
+//    Laptop webcams are FRONT-facing. Setting isFront=false meant
+//    no mirror on the video AND no coordinate mirror on boxes,
+//    so everything was backwards. Fix: isFront = !isMobile on
+//    laptop (always mirror), mobile only mirrors on 'user' facingMode.
+//
+//  FIX C — Canvas race condition (previous fix retained):
+//    renderLoopId tracked and cancelled before new session starts.
+//    Canvas sized before video.play() so it's never 0.
 // ============================================================
 
+// ── DOM refs ───────────────────────────────────────────────
 const video          = document.getElementById('webcam');
 const canvas         = document.getElementById('output_canvas');
 const ctx            = canvas.getContext('2d');
@@ -25,17 +35,17 @@ const detectionCount = document.getElementById('detectionCount');
 
 // ── State ──────────────────────────────────────────────────
 let model             = null;
-let currentFacingMode = 'environment';  // only used on mobile
+let currentFacingMode = 'environment';
 let streamActive      = false;
 let inferenceRunning  = false;
 let lastBoxes         = [];
-let renderLoopId      = null;           // tracks rAF id so we can cancel it
+let renderLoopId      = null;
 
 // ── FPS ────────────────────────────────────────────────────
 let fpsFrameCount = 0;
 let fpsLastTime   = performance.now();
 
-// ── Device ─────────────────────────────────────────────────
+// ── Device detection ───────────────────────────────────────
 const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
 if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
@@ -49,9 +59,10 @@ const CONF_THRESHOLD = isMobile ? 0.40 : 0.45;
 const IOU_THRESHOLD  = 0.35;
 const MAX_DETECTIONS = 12;
 const INPUT_SIZE     = 640;
+const NUM_CLASSES    = 80;   // COCO — hard-coded, no guessing from shape
 
-// ── Class names ────────────────────────────────────────────
-const yoloClasses = [
+// ── Class names (80 COCO) ──────────────────────────────────
+const COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
     'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat',
     'dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack',
@@ -62,7 +73,7 @@ const yoloClasses = [
     'couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote',
     'keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book',
     'clock','vase','scissors','teddy bear','hair drier','toothbrush'
-];
+];   // exactly 80 entries
 
 const CLASS_COLORS = [
     '#FF3838','#FF9D97','#FF701F','#FFB21D','#CFD231','#48F90A','#92CC17','#3DDB86',
@@ -70,14 +81,14 @@ const CLASS_COLORS = [
     '#520085','#CB38FF','#FF95C8','#FF37C7'
 ];
 
-const getColor = id => CLASS_COLORS[id % CLASS_COLORS.length];
+const getColor = id => CLASS_COLORS[Math.abs(id) % CLASS_COLORS.length];
 
 // ── IOU ────────────────────────────────────────────────────
 function iouScore(a, b) {
-    const aL = a.x - a.w / 2, aR = a.x + a.w / 2;
-    const aT = a.y - a.h / 2, aB = a.y + a.h / 2;
-    const bL = b.x - b.w / 2, bR = b.x + b.w / 2;
-    const bT = b.y - b.h / 2, bB = b.y + b.h / 2;
+    const aL = a.cx - a.w / 2,  aR = a.cx + a.w / 2;
+    const aT = a.cy - a.h / 2,  aB = a.cy + a.h / 2;
+    const bL = b.cx - b.w / 2,  bR = b.cx + b.w / 2;
+    const bT = b.cy - b.h / 2,  bB = b.cy + b.h / 2;
     const iW = Math.max(0, Math.min(aR, bR) - Math.max(aL, bL));
     const iH = Math.max(0, Math.min(aB, bB) - Math.max(aT, bT));
     const inter = iW * iH;
@@ -111,7 +122,6 @@ async function loadModel() {
         setStatus('loading', '⏳ Initializing WebGL...');
         await tf.setBackend('webgl');
         await tf.ready();
-
         tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 0);
         tf.env().set('WEBGL_PACK', true);
         tf.env().set('WEBGL_CONV_IM2COL', true);
@@ -119,21 +129,18 @@ async function loadModel() {
         setStatus('loading', '⏳ Downloading model...');
         model = await tf.loadGraphModel(modelPath);
 
-        setStatus('loading', '🔥 Warming up GPU (one-time ~5s)...');
+        // Warm-up: compiles GPU shaders so first real frame is instant
+        setStatus('loading', '🔥 Warming up GPU (~5s)...');
         const dummy = tf.zeros([1, INPUT_SIZE, INPUT_SIZE, 3]);
         let warmOut;
-        try {
-            warmOut = model.execute(dummy);
-        } catch {
-            warmOut = await model.executeAsync(dummy);
-        }
+        try   { warmOut = model.execute(dummy); }
+        catch { warmOut = await model.executeAsync(dummy); }
         if (Array.isArray(warmOut)) warmOut.forEach(t => t.dispose());
         else warmOut.dispose();
         dummy.dispose();
 
         const label = isMobile ? 'Nano · Fast Mode' : 'Small · High Accuracy';
         setStatus('active', `✅ System Active — ${label}`);
-
         await startWebcam();
 
     } catch (err) {
@@ -144,64 +151,53 @@ async function loadModel() {
 
 // ── Webcam ─────────────────────────────────────────────────
 async function startWebcam() {
-    // ── FIX 1: Stop old loops cleanly BEFORE touching the stream ──
-    // Setting streamActive = false signals the inferenceLoop while()
-    // to exit on its next iteration.
+    // Stop old loops before touching the stream
     streamActive     = false;
     inferenceRunning = false;
     lastBoxes        = [];
 
-    // Cancel any pending rAF from the old renderLoop
     if (renderLoopId !== null) {
         cancelAnimationFrame(renderLoopId);
         renderLoopId = null;
     }
 
-    // Stop old camera tracks
     if (video.srcObject) {
         video.srcObject.getTracks().forEach(t => t.stop());
         video.srcObject = null;
     }
 
-    // Small delay to let any in-flight rAF callbacks finish
+    // Let any queued rAF callbacks drain before starting fresh
     await waitFrame();
     await waitFrame();
 
     try {
-        const facingMode = isMobile ? currentFacingMode : 'environment';
-
         const stream = await navigator.mediaDevices.getUserMedia({
             video: {
-                facingMode,
-                width:     { ideal: 1280 },
-                height:    { ideal: 720  },
-                frameRate: { ideal: 30   }
+                facingMode: isMobile ? currentFacingMode : 'user',
+                width:      { ideal: 1280 },
+                height:     { ideal: 720  },
+                frameRate:  { ideal: 30   }
             }
         });
 
         video.srcObject = stream;
-
-        // Wait for metadata so videoWidth/videoHeight are valid
         await new Promise(resolve => { video.onloadedmetadata = resolve; });
 
-        // ── FIX 2: Set canvas size before playing, while dimensions are known ──
-        // Resetting canvas.width clears the canvas — do it now, not mid-draw
+        // Set canvas size while dimensions are known, before play()
         canvas.width  = video.videoWidth  || 640;
         canvas.height = video.videoHeight || 480;
 
         await video.play();
 
-        // ── FIX 3: isFront is a stable boolean for this camera session ──
-        // On laptop we always mirror (front cam). On mobile, only for selfie cam.
-        const isFront = isMobile ? (currentFacingMode === 'user') : false;
+        // ── FIX B: isFront logic ──────────────────────────
+        // Laptop: always front-facing (mirror video + mirror boxes)
+        // Mobile: mirror only when using selfie cam
+        const isFront = isMobile
+            ? (currentFacingMode === 'user')
+            : true;   // laptop webcam is always front-facing
 
-        // Everything is ready — activate loops
         streamActive = true;
-
-        // Start render loop, capturing isFront in closure
         startRenderLoop(isFront);
-
-        // Start inference loop, capturing isFront in closure
         runInferenceLoop(isFront);
 
     } catch (err) {
@@ -222,23 +218,17 @@ if (switchCamBtn) {
 }
 
 // ============================================================
-//  RENDER LOOP
-//  Draws video frame + detection boxes every animation frame.
-//  isFront is captured at startWebcam() time — stable for the
-//  entire camera session, no per-frame recomputation.
+//  RENDER LOOP — 60 fps, never waits for inference
 // ============================================================
 function startRenderLoop(isFront) {
     function frame() {
-        // ── FIX 1: Exit immediately if this session is over ──
         if (!streamActive) return;
 
-        // Clear canvas first — prevents ghost frames if video stalls
+        // Always clear to avoid ghost frames if video stalls
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Draw video frame
         if (video.readyState >= 2) {
             if (isFront) {
-                // Mirror horizontally for selfie/front cam
                 ctx.save();
                 ctx.translate(canvas.width, 0);
                 ctx.scale(-1, 1);
@@ -249,31 +239,25 @@ function startRenderLoop(isFront) {
             }
         }
 
-        // Overlay detection boxes
         drawBoxes(lastBoxes, isFront);
 
-        // FPS counter
+        // FPS
         fpsFrameCount++;
         const now = performance.now();
         if (now - fpsLastTime >= 1000) {
-            if (fpsDisplay) {
-                fpsDisplay.textContent = Math.round((fpsFrameCount * 1000) / (now - fpsLastTime));
-            }
+            if (fpsDisplay) fpsDisplay.textContent =
+                Math.round((fpsFrameCount * 1000) / (now - fpsLastTime));
             fpsFrameCount = 0;
             fpsLastTime   = now;
         }
 
-        // Schedule next frame and store ID so we can cancel it
         renderLoopId = requestAnimationFrame(frame);
     }
-
     renderLoopId = requestAnimationFrame(frame);
 }
 
 // ============================================================
-//  INFERENCE LOOP
-//  Runs model inference as fast as the GPU allows.
-//  Updates lastBoxes so renderLoop picks them up.
+//  INFERENCE LOOP — runs as fast as GPU allows
 // ============================================================
 async function runInferenceLoop(isFront) {
     while (streamActive) {
@@ -285,7 +269,6 @@ async function runInferenceLoop(isFront) {
         inferenceRunning = true;
 
         try {
-            // Build input tensor inside tf.tidy so intermediates are freed
             const inputTensor = tf.tidy(() =>
                 tf.browser.fromPixels(video)
                     .resizeBilinear([INPUT_SIZE, INPUT_SIZE])
@@ -294,33 +277,25 @@ async function runInferenceLoop(isFront) {
                     .div(255.0)
             );
 
-            // model.execute() is synchronous GPU scheduling — much faster
-            // than executeAsync which awaits the full CPU round-trip
             let rawOut;
-            try {
-                rawOut = model.execute(inputTensor);
-            } catch {
-                rawOut = await model.executeAsync(inputTensor);
-            }
+            try   { rawOut = model.execute(inputTensor); }
+            catch { rawOut = await model.executeAsync(inputTensor); }
             inputTensor.dispose();
 
             const outTensor = Array.isArray(rawOut) ? rawOut[0] : rawOut;
-            const shape     = outTensor.shape;
+            const shape     = outTensor.shape;        // e.g. [1, 84, 8400]
+            const flatData  = await outTensor.data(); // Float32Array
 
-            // async .data() reads GPU result without blocking the render loop
-            const flatData = await outTensor.data();
-
-            // Dispose all output tensors properly
             if (Array.isArray(rawOut)) rawOut.forEach(t => t.dispose());
             else rawOut.dispose();
 
-            // Parse detections and run NMS
+            // ── FIX A: parse with explicit layout detection ──
             const candidates = parseDetections(flatData, shape);
             lastBoxes = nms(candidates);
 
-            // Update UI
             if (lastBoxes.length > 0) {
-                setStatus('active', `🟢 ${lastBoxes.length} object${lastBoxes.length !== 1 ? 's' : ''} detected`);
+                setStatus('active',
+                    `🟢 ${lastBoxes.length} object${lastBoxes.length !== 1 ? 's' : ''} detected`);
                 if (detectionCount) detectionCount.textContent = lastBoxes.length;
             } else {
                 setStatus('scanning', '📡 Scanning...');
@@ -332,62 +307,121 @@ async function runInferenceLoop(isFront) {
         }
 
         inferenceRunning = false;
-
-        // Yield one frame between inferences — prevents GPU starvation
         await waitFrame();
     }
 }
 
-// ── Parse model output → candidate boxes ───────────────────
+// ============================================================
+//  PARSE DETECTIONS
+//
+//  YOLOv8 TF.js output is ALWAYS [1, 84, 8400]:
+//    - dim 1 = 84  = 4 box coords + 80 class scores (rows)
+//    - dim 2 = 8400 = number of candidate boxes (columns)
+//
+//  Memory layout (row-major, batch=1 squeezed):
+//    index = row * 8400 + col
+//    row 0 → cx for all 8400 boxes
+//    row 1 → cy for all 8400 boxes
+//    row 2 → w  for all 8400 boxes
+//    row 3 → h  for all 8400 boxes
+//    row 4..83 → class scores for all 8400 boxes
+//
+//  The old code used (shape[1] > shape[2]) which is 84>8400=false
+//  so it fell into the WRONG branch every time.
+//  We now detect layout by checking which dimension equals
+//  NUM_BOXES (8400) and which equals NUM_CLASSES+4 (84).
+// ============================================================
 function parseDetections(flatData, shape) {
     const candidates = [];
-    if (shape.length !== 3) return candidates;
 
-    if (shape[1] > shape[2]) {
-        // Shape [1, 84, 8400]: each column is a detection
-        const numClasses = shape[1] - 4;
-        const numBoxes   = shape[2];
+    if (!shape || shape.length < 2) return candidates;
+
+    // Strip leading batch dimension if present
+    const dims = shape.length === 3 ? [shape[1], shape[2]] : [shape[0], shape[1]];
+
+    // Figure out which dimension is "channels" (84) and which is "boxes" (8400)
+    // channels = NUM_CLASSES + 4 = 84
+    // We identify by size: the smaller dim is channels, larger is boxes
+    // Both must be sane values — guard against weird shapes
+    const CHANNELS = NUM_CLASSES + 4;  // 84
+
+    let numChannels, numBoxes;
+
+    if (dims[0] === CHANNELS) {
+        // Layout [84, 8400] — standard YOLOv8 TF.js output
+        numChannels = dims[0];
+        numBoxes    = dims[1];
+    } else if (dims[1] === CHANNELS) {
+        // Layout [8400, 84] — transposed
+        numBoxes    = dims[0];
+        numChannels = dims[1];
+    } else {
+        // Unexpected shape — try to recover by treating smaller as channels
+        if (dims[0] < dims[1]) {
+            numChannels = dims[0];
+            numBoxes    = dims[1];
+        } else {
+            numBoxes    = dims[0];
+            numChannels = dims[1];
+        }
+        console.warn('Unexpected output shape:', shape, '— guessing layout');
+    }
+
+    const numClasses = numChannels - 4;  // should be 80
+
+    // Safety check: classId must stay within COCO_CLASSES array
+    if (numClasses <= 0 || numClasses > 200) {
+        console.error('Parsed numClasses is invalid:', numClasses, 'from shape:', shape);
+        return candidates;
+    }
+
+    if (dims[0] === CHANNELS || (dims[0] < dims[1] && dims[0] !== numBoxes)) {
+        // ── Layout [channels, boxes] = [84, 8400] ──────────
+        // index formula: flatData[row * numBoxes + col]
         for (let col = 0; col < numBoxes; col++) {
             let maxConf = 0, classId = -1;
             for (let cls = 0; cls < numClasses; cls++) {
-                const conf = flatData[(cls + 4) * numBoxes + col];
+                const conf = flatData[(4 + cls) * numBoxes + col];
                 if (conf > maxConf) { maxConf = conf; classId = cls; }
             }
-            if (maxConf >= CONF_THRESHOLD) {
+            if (maxConf >= CONF_THRESHOLD && classId >= 0 && classId < COCO_CLASSES.length) {
                 candidates.push({
-                    x: flatData[0 * numBoxes + col],
-                    y: flatData[1 * numBoxes + col],
-                    w: flatData[2 * numBoxes + col],
-                    h: flatData[3 * numBoxes + col],
-                    conf: maxConf, classId
+                    cx:      flatData[0 * numBoxes + col],
+                    cy:      flatData[1 * numBoxes + col],
+                    w:       flatData[2 * numBoxes + col],
+                    h:       flatData[3 * numBoxes + col],
+                    conf:    maxConf,
+                    classId: classId
                 });
             }
         }
     } else {
-        // Shape [1, 8400, 84]: each row is a detection
-        const numBoxes   = shape[1];
-        const numCols    = shape[2];
-        const numClasses = numCols - 4;
+        // ── Layout [boxes, channels] = [8400, 84] ──────────
+        // index formula: flatData[row * numChannels + col]
         for (let row = 0; row < numBoxes; row++) {
-            const base = row * numCols;
+            const base = row * numChannels;
             let maxConf = 0, classId = -1;
             for (let cls = 0; cls < numClasses; cls++) {
                 const conf = flatData[base + 4 + cls];
                 if (conf > maxConf) { maxConf = conf; classId = cls; }
             }
-            if (maxConf >= CONF_THRESHOLD) {
+            if (maxConf >= CONF_THRESHOLD && classId >= 0 && classId < COCO_CLASSES.length) {
                 candidates.push({
-                    x: flatData[base],     y: flatData[base + 1],
-                    w: flatData[base + 2], h: flatData[base + 3],
-                    conf: maxConf, classId
+                    cx:      flatData[base + 0],
+                    cy:      flatData[base + 1],
+                    w:       flatData[base + 2],
+                    h:       flatData[base + 3],
+                    conf:    maxConf,
+                    classId: classId
                 });
             }
         }
     }
+
     return candidates;
 }
 
-// ── Draw detection boxes ────────────────────────────────────
+// ── Draw boxes ─────────────────────────────────────────────
 function drawBoxes(boxes, isFront) {
     if (!boxes.length) return;
 
@@ -396,23 +430,26 @@ function drawBoxes(boxes, isFront) {
 
     boxes.forEach(box => {
         const color = getColor(box.classId);
-        const label = `${yoloClasses[box.classId] || 'Object'} ${Math.round(box.conf * 100)}%`;
+        const name  = (box.classId >= 0 && box.classId < COCO_CLASSES.length)
+            ? COCO_CLASSES[box.classId]
+            : 'Object';
+        const label = `${name} ${Math.round(box.conf * 100)}%`;
 
-        let { x, y, w, h } = box;
+        // box coords are in [0, INPUT_SIZE] space (cx, cy, w, h)
+        let { cx, cy, w, h } = box;
 
-        // Handle un-normalised coordinates (rare edge case)
-        if (w <= 2.0 && h <= 2.0) {
-            x *= INPUT_SIZE; y *= INPUT_SIZE;
-            w *= INPUT_SIZE; h *= INPUT_SIZE;
-        }
-
-        let left = (x - w / 2) * sx;
-        let top  = (y - h / 2) * sy;
+        // Scale to canvas pixels
+        let left = (cx - w / 2) * sx;
+        let top  = (cy - h / 2) * sy;
         const bw = w * sx;
         const bh = h * sy;
 
-        // Mirror box position for front camera
+        // Mirror X coordinate for front camera
         if (isFront) left = canvas.width - left - bw;
+
+        // Clamp to canvas bounds
+        left = Math.max(0, Math.min(left, canvas.width  - 1));
+        top  = Math.max(0, Math.min(top,  canvas.height - 1));
 
         ctx.save();
 
@@ -423,22 +460,31 @@ function drawBoxes(boxes, isFront) {
         ctx.shadowBlur  = 6;
         ctx.strokeRect(left, top, bw, bh);
 
-        // Corner brackets
-        const c = Math.min(14, bw * 0.18, bh * 0.18);
+        // Corner brackets (tactical style)
+        const c = Math.max(6, Math.min(16, bw * 0.15, bh * 0.15));
         ctx.lineWidth  = 3;
         ctx.shadowBlur = 0;
         ctx.beginPath();
-        ctx.moveTo(left,          top + c);      ctx.lineTo(left,          top);      ctx.lineTo(left + c,      top);
-        ctx.moveTo(left + bw - c, top);          ctx.lineTo(left + bw,     top);      ctx.lineTo(left + bw,     top + c);
-        ctx.moveTo(left,          top + bh - c); ctx.lineTo(left,          top + bh); ctx.lineTo(left + c,      top + bh);
-        ctx.moveTo(left + bw - c, top + bh);     ctx.lineTo(left + bw,     top + bh); ctx.lineTo(left + bw,     top + bh - c);
+        // top-left
+        ctx.moveTo(left,          top + c);      ctx.lineTo(left,          top);
+        ctx.lineTo(left + c,      top);
+        // top-right
+        ctx.moveTo(left + bw - c, top);          ctx.lineTo(left + bw,     top);
+        ctx.lineTo(left + bw,     top + c);
+        // bottom-left
+        ctx.moveTo(left,          top + bh - c); ctx.lineTo(left,          top + bh);
+        ctx.lineTo(left + c,      top + bh);
+        // bottom-right
+        ctx.moveTo(left + bw - c, top + bh);     ctx.lineTo(left + bw,     top + bh);
+        ctx.lineTo(left + bw,     top + bh - c);
         ctx.stroke();
 
         // Label pill
         ctx.font = 'bold 12px "Outfit", sans-serif';
         const tw = ctx.measureText(label).width;
         const ph = 20, px = 7;
-        const lx = Math.max(0, Math.min(left, canvas.width  - tw - px * 2 - 2));
+        // Keep label inside canvas horizontally
+        const lx = Math.max(0, Math.min(left, canvas.width  - tw - px * 2 - 1));
         const ly = top > ph + 4 ? top - ph - 3 : top + 3;
 
         ctx.fillStyle = color;
