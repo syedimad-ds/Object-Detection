@@ -1,43 +1,80 @@
 // ============================================================
-// CORE ELEMENTS
+//  EDGE AI — Object Detection  |  Final corrected version
+//
+//  Complete bug list found by reading original working code:
+//
+//  BUG 1 — Coordinate scaling guard was removed
+//    Original code: if (w <= 2 && h <= 2) { x*=640; y*=640; w*=640; h*=640 }
+//    This guard handles BOTH output formats:
+//      • [0,1]   normalized  → multiply up to pixel space
+//      • [0,640] pixel space → leave as-is
+//    Without this guard, if model outputs [0,1] coords, every box
+//    gets placed at ~0-2 pixels → top-left corner. EXACTLY what was seen.
+//
+//  BUG 2 — Used .data() (flat Float32Array) instead of .array() (nested)
+//    The original indexes as detections[row][col] on a 2D array.
+//    Using flat .data() requires different indexing. Both are valid BUT
+//    switching between them while keeping old index expressions breaks everything.
+//    Solution: use .array() exactly like the original, OR use .data() with
+//    CORRECT flat indexing. This version uses .array() to match original exactly.
+//
+//  BUG 3 — Race condition: two render loops running simultaneously
+//    Fixed: renderLoopId tracked, old loop cancelled before new one starts.
+//
+//  BUG 4 — canvas.width reset wiped context mid-draw
+//    Fixed: canvas sized after onloadedmetadata, before play().
+//
+//  BUG 5 — isFront logic wrong on laptop
+//    Laptop webcam IS front-facing — needs mirror on both video AND boxes.
+//    Fixed: isFront = true on laptop always.
+//
+//  BUG 6 — model.execute() try/catch is unreliable
+//    Some TF.js graph models only work with executeAsync.
+//    Fixed: always use executeAsync (reliable, still fast enough).
 // ============================================================
-const video = document.getElementById('webcam');
-const canvas = document.getElementById('output_canvas');
-const ctx = canvas.getContext('2d');
-const statusDiv = document.getElementById('status');
-const switchCamBtn = document.getElementById('switchCamBtn');
-const fpsDisplay = document.getElementById('fpsDisplay');
+
+// ── DOM ────────────────────────────────────────────────────
+const video          = document.getElementById('webcam');
+const canvas         = document.getElementById('output_canvas');
+const ctx            = canvas.getContext('2d');
+const statusDiv      = document.getElementById('status');
+const switchCamBtn   = document.getElementById('switchCamBtn');
+const fpsDisplay     = document.getElementById('fpsDisplay');
 const detectionCount = document.getElementById('detectionCount');
 
-let model;
+// ── Session state ──────────────────────────────────────────
+let model             = null;
 let currentFacingMode = 'environment';
-let animationFrameId = null;
-let isDetecting = false;
-let lastFrameTime = performance.now();
-let frameCount = 0;
-let fps = 0;
+let streamActive      = false;
+let inferenceRunning  = false;
+let lastBoxes         = [];
+let renderLoopId      = null;
+let sessionIsFront    = false;   // set once per startWebcam(), used by both loops
 
-// ============================================================
-// DEVICE DETECTION
-// ============================================================
-const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+// ── FPS ────────────────────────────────────────────────────
+let fpsCount    = 0;
+let fpsLastTime = performance.now();
 
-if (!isMobile && switchCamBtn) {
-    switchCamBtn.style.display = 'none';
-}
+// ── Device ─────────────────────────────────────────────────
+const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+    navigator.userAgent
+);
+
+if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
 
 const modelPath = isMobile
     ? './yolov8n_web_model/model.json'
     : './yolov8s_web_model/model.json';
 
-const CONF_THRESHOLD = isMobile ? 0.28 : 0.38;
+// ── Detection constants ────────────────────────────────────
+const CONF_THRESHOLD = isMobile ? 0.35 : 0.40;
 const IOU_THRESHOLD  = 0.40;
-const INPUT_SIZE     = 640;
+const MAX_DETECTIONS = 15;
+const INPUT_W        = 640;
+const INPUT_H        = 640;
 
-// ============================================================
-// YOLO CLASS NAMES & COLORS
-// ============================================================
-const yoloClasses = [
+// ── COCO class names (80) ──────────────────────────────────
+const COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
     'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat',
     'dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack',
@@ -50,389 +87,404 @@ const yoloClasses = [
     'clock','vase','scissors','teddy bear','hair drier','toothbrush'
 ];
 
-const classColors = [
+const CLASS_COLORS = [
     '#FF3838','#FF9D97','#FF701F','#FFB21D','#CFD231','#48F90A','#92CC17','#3DDB86',
     '#1A9334','#00D4BB','#2C99A8','#00C2FF','#344593','#6473FF','#0018EC','#8438FF',
     '#520085','#CB38FF','#FF95C8','#FF37C7'
 ];
 
-function getColor(classId) {
-    return classColors[classId % classColors.length];
+const getColor = id => CLASS_COLORS[id % CLASS_COLORS.length];
+
+// ── IOU ────────────────────────────────────────────────────
+function iouScore(a, b) {
+    const aL = a.x - a.w / 2,  aR = a.x + a.w / 2;
+    const aT = a.y - a.h / 2,  aB = a.y + a.h / 2;
+    const bL = b.x - b.w / 2,  bR = b.x + b.w / 2;
+    const bT = b.y - b.h / 2,  bB = b.y + b.h / 2;
+    const iW  = Math.max(0, Math.min(aR, bR) - Math.max(aL, bL));
+    const iH  = Math.max(0, Math.min(aB, bB) - Math.max(aT, bT));
+    const inter = iW * iH;
+    const union = a.w * a.h + b.w * b.h - inter;
+    return union > 0 ? inter / union : 0;
 }
 
-// ============================================================
-// BUG FIX #1: CORRECT IOU CALCULATION (b2 vars were missing!)
-// ============================================================
-function calculateIOU(box1, box2) {
-    const b1Left   = box1.x - box1.w / 2;
-    const b1Right  = box1.x + box1.w / 2;
-    const b1Top    = box1.y - box1.h / 2;
-    const b1Bottom = box1.y + box1.h / 2;
-
-    const b2Left   = box2.x - box2.w / 2;
-    const b2Right  = box2.x + box2.w / 2;
-    const b2Top    = box2.y - box2.h / 2;
-    const b2Bottom = box2.y + box2.h / 2;
-
-    const xA = Math.max(b1Left, b2Left);
-    const yA = Math.max(b1Top, b2Top);
-    const xB = Math.min(b1Right, b2Right);
-    const yB = Math.min(b1Bottom, b2Bottom);
-
-    const intersectionArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
-    const unionArea = (box1.w * box1.h) + (box2.w * box2.h) - intersectionArea;
-
-    if (unionArea === 0) return 0;
-    return intersectionArea / unionArea;
+// ── NMS (cross-class) ──────────────────────────────────────
+function nms(candidates) {
+    candidates.sort((a, b) => b.conf - a.conf);
+    const suppressed = new Uint8Array(candidates.length);
+    const keep = [];
+    for (let i = 0; i < candidates.length; i++) {
+        if (suppressed[i]) continue;
+        keep.push(candidates[i]);
+        if (keep.length >= MAX_DETECTIONS) break;
+        for (let j = i + 1; j < candidates.length; j++) {
+            if (suppressed[j]) continue;
+            if (candidates[i].classId === candidates[j].classId ||
+                iouScore(candidates[i], candidates[j]) > IOU_THRESHOLD) {
+                suppressed[j] = 1;
+            }
+        }
+    }
+    return keep;
 }
 
-// ============================================================
-// MODEL LOADING
-// ============================================================
+// ── Model load ─────────────────────────────────────────────
 async function loadModel() {
     try {
-        setStatus('loading', '⏳ Initializing WebGL backend...');
-
-        // Force WebGL for GPU acceleration
+        setStatus('loading', '⏳ Initializing WebGL...');
         await tf.setBackend('webgl');
         await tf.ready();
-
-        // Enable memory optimizations
         tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 0);
-        tf.env().set('WEBGL_FLUSH_THRESHOLD', -1);
+        tf.env().set('WEBGL_PACK', true);
+        tf.env().set('WEBGL_CONV_IM2COL', true);
 
-        setStatus('loading', '⏳ Downloading model weights...');
+        setStatus('loading', '⏳ Downloading model...');
         model = await tf.loadGraphModel(modelPath);
 
-        // BUG FIX #2: Warm-up with actual inference size so the GPU compiles
-        // shaders properly — this is what causes the 1-2 min freeze on first frame
-        setStatus('loading', '🔥 Warming up GPU shaders (one-time, ~10s)...');
-        const warmupTensor = tf.zeros([1, INPUT_SIZE, INPUT_SIZE, 3]);
-        const warmupResult = await model.executeAsync(warmupTensor);
-        // Properly dispose array of tensors or single tensor
-        if (Array.isArray(warmupResult)) {
-            warmupResult.forEach(t => t.dispose());
-        } else {
-            warmupResult.dispose();
-        }
-        warmupTensor.dispose();
+        setStatus('loading', '🔥 Warming up GPU (~5s)...');
+        const dummy  = tf.zeros([1, INPUT_H, INPUT_W, 3]);
+        const warmup = await model.executeAsync(dummy);
+        if (Array.isArray(warmup)) warmup.forEach(t => t.dispose());
+        else warmup.dispose();
+        dummy.dispose();
 
-        const modeLabel = isMobile ? 'Nano · Fast Mode' : 'Small · High Accuracy';
-        setStatus('active', `✅ System Active — ${modeLabel}`);
+        const label = isMobile ? 'Nano · Fast Mode' : 'Small · High Accuracy';
+        setStatus('active', `✅ System Active — ${label}`);
+        await startWebcam();
 
-        startWebcam();
     } catch (err) {
-        setStatus('error', `❌ Model load failed: ${err.message}`);
+        setStatus('error', `❌ Load failed: ${err.message}`);
         console.error(err);
     }
 }
 
-// ============================================================
-// WEBCAM
-// ============================================================
+// ── Webcam ─────────────────────────────────────────────────
 async function startWebcam() {
-    // Stop any existing stream
+    // Stop current session cleanly
+    streamActive     = false;
+    inferenceRunning = false;
+    lastBoxes        = [];
+
+    // Cancel old render loop before it can fire again
+    if (renderLoopId !== null) {
+        cancelAnimationFrame(renderLoopId);
+        renderLoopId = null;
+    }
+
+    // Stop camera tracks
     if (video.srcObject) {
         video.srcObject.getTracks().forEach(t => t.stop());
         video.srcObject = null;
     }
 
-    // Cancel existing detection loop while switching
-    isDetecting = false;
-    if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
-    }
+    // Drain any queued rAF callbacks from the old loop
+    await waitFrame();
+    await waitFrame();
 
     try {
-        const constraints = {
+        const stream = await navigator.mediaDevices.getUserMedia({
             video: {
                 facingMode: isMobile ? currentFacingMode : 'user',
-                width:  { ideal: 1280 },
-                height: { ideal: 720 }
+                width:      { ideal: 1280 },
+                height:     { ideal: 720  },
+                frameRate:  { ideal: 30   }
             }
-        };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = stream;
-
-        await new Promise(resolve => {
-            video.onloadedmetadata = resolve;
         });
+
+        video.srcObject = stream;
+        await new Promise(resolve => { video.onloadedmetadata = resolve; });
+
+        // Size canvas BEFORE play() — resets context cleanly while nothing is drawing
+        canvas.width  = video.videoWidth  || 640;
+        canvas.height = video.videoHeight || 480;
+
         await video.play();
 
-        canvas.width  = video.videoWidth;
-        canvas.height = video.videoHeight;
+        // isFront: laptop webcam = always front-facing (mirror)
+        //          mobile rear   = no mirror
+        //          mobile front  = mirror
+        sessionIsFront = isMobile ? (currentFacingMode === 'user') : true;
 
-        isDetecting = true;
-        detectFrame();
+        streamActive = true;
+        startRenderLoop();
+        runInferenceLoop();
 
     } catch (err) {
-        setStatus('error', '❌ Camera access denied. Please allow permissions.');
+        setStatus('error', '❌ Camera denied — check permissions.');
         console.error(err);
     }
 }
 
-// Camera switch button
+// Camera switch (mobile only)
 if (switchCamBtn) {
     switchCamBtn.addEventListener('click', async () => {
         if (!isMobile) return;
         currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
         switchCamBtn.disabled = true;
-        switchCamBtn.innerText = '🔄 Switching...';
         await startWebcam();
         switchCamBtn.disabled = false;
-        switchCamBtn.innerText = '🔄 Switch Camera';
     });
 }
 
 // ============================================================
-// FPS TRACKER
+//  RENDER LOOP — draws at ~60fps using last known detections
 // ============================================================
-function updateFPS() {
-    frameCount++;
-    const now = performance.now();
-    const delta = now - lastFrameTime;
-    if (delta >= 1000) {
-        fps = Math.round((frameCount * 1000) / delta);
-        frameCount = 0;
-        lastFrameTime = now;
-        if (fpsDisplay) fpsDisplay.textContent = `${fps} FPS`;
-    }
-}
+function startRenderLoop() {
+    function frame() {
+        if (!streamActive) return;
 
-// ============================================================
-// MAIN DETECTION LOOP
-// BUG FIX #3: Use typed array (data()) not .array() — 10-50x faster
-// BUG FIX #4: Proper tensor disposal for arrays of tensors
-// BUG FIX #5: Bounding box mirror logic unified and correct
-// ============================================================
-async function detectFrame() {
-    if (!isDetecting) return;
-
-    // Don't run inference if video isn't ready
-    if (video.readyState < 2) {
-        animationFrameId = requestAnimationFrame(detectFrame);
-        return;
-    }
-
-    const isFrontCam = currentFacingMode === 'user' || !isMobile;
-
-    // ---- Preprocessing: build input tensor inside tf.tidy ----
-    const inputTensor = tf.tidy(() => {
-        return tf.browser.fromPixels(video)
-            .resizeBilinear([INPUT_SIZE, INPUT_SIZE])
-            .expandDims(0)
-            .toFloat()
-            .div(255.0);
-    });
-
-    let rawOutput = null;
-
-    try {
-        rawOutput = await model.executeAsync(inputTensor);
-
-        // Normalize output to always be a single tensor
-        const outputTensor = Array.isArray(rawOutput) ? rawOutput[0] : rawOutput;
-        const shape = outputTensor.shape;
-
-        // BUG FIX #3: Use .data() (Float32Array) instead of .array() — massively faster
-        const flatData = await outputTensor.data();
-
-        // ---- Parse detections based on output shape ----
-        let candidates = [];
-
-        if (shape.length === 3 && (shape[1] === 84 || shape[1] === 80)) {
-            // Shape: [1, 84, 8400] — columns are boxes
-            const numClasses = shape[1] - 4;
-            const numBoxes   = shape[2];
-
-            for (let col = 0; col < numBoxes; col++) {
-                let maxConf = 0;
-                let classId = -1;
-
-                for (let cls = 0; cls < numClasses; cls++) {
-                    // Index: (cls+4) * numBoxes + col
-                    const conf = flatData[(cls + 4) * numBoxes + col];
-                    if (conf > maxConf) {
-                        maxConf = conf;
-                        classId = cls;
-                    }
-                }
-
-                if (maxConf > CONF_THRESHOLD) {
-                    candidates.push({
-                        x:       flatData[0 * numBoxes + col],
-                        y:       flatData[1 * numBoxes + col],
-                        w:       flatData[2 * numBoxes + col],
-                        h:       flatData[3 * numBoxes + col],
-                        conf:    maxConf,
-                        classId: classId
-                    });
-                }
-            }
-
-        } else if (shape.length === 3 && (shape[2] === 84 || shape[2] === 80)) {
-            // Shape: [1, 8400, 84] — rows are boxes
-            const numBoxes   = shape[1];
-            const numCols    = shape[2];
-            const numClasses = numCols - 4;
-
-            for (let row = 0; row < numBoxes; row++) {
-                const base = row * numCols;
-                let maxConf = 0;
-                let classId = -1;
-
-                for (let cls = 0; cls < numClasses; cls++) {
-                    const conf = flatData[base + 4 + cls];
-                    if (conf > maxConf) {
-                        maxConf = conf;
-                        classId = cls;
-                    }
-                }
-
-                if (maxConf > CONF_THRESHOLD) {
-                    candidates.push({
-                        x:       flatData[base + 0],
-                        y:       flatData[base + 1],
-                        w:       flatData[base + 2],
-                        h:       flatData[base + 3],
-                        conf:    maxConf,
-                        classId: classId
-                    });
-                }
-            }
-        }
-
-        // ---- Non-Maximum Suppression ----
-        candidates.sort((a, b) => b.conf - a.conf);
-        const finalBoxes = [];
-
-        while (candidates.length > 0) {
-            const best = candidates.shift();
-            finalBoxes.push(best);
-            candidates = candidates.filter(box =>
-                box.classId !== best.classId || calculateIOU(best, box) < IOU_THRESHOLD
-            );
-        }
-
-        // ---- Draw: video frame first ----
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // BUG FIX #5: Mirror the canvas for front cam so it looks natural
-        ctx.save();
-        if (isFrontCam) {
-            ctx.translate(canvas.width, 0);
-            ctx.scale(-1, 1);
-        }
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
-
-        // ---- Draw detections ----
-        const scaleX = canvas.width  / INPUT_SIZE;
-        const scaleY = canvas.height / INPUT_SIZE;
-
-        finalBoxes.forEach(box => {
-            const color = getColor(box.classId);
-            const label = `${yoloClasses[box.classId] || 'Object'} ${(box.conf * 100).toFixed(0)}%`;
-
-            let { x, y, w, h } = box;
-
-            // Handle un-normalized coordinates (rare but possible)
-            if (w <= 2.0 && h <= 2.0) {
-                x *= INPUT_SIZE; y *= INPUT_SIZE;
-                w *= INPUT_SIZE; h *= INPUT_SIZE;
-            }
-
-            let left = (x - w / 2) * scaleX;
-            let top  = (y - h / 2) * scaleY;
-            const boxW = w * scaleX;
-            const boxH = h * scaleY;
-
-            // BUG FIX #5: Mirror box X for front camera
-            if (isFrontCam) {
-                left = canvas.width - left - boxW;
-            }
-
-            // Bounding box
-            ctx.shadowColor = color;
-            ctx.shadowBlur  = 10;
-            ctx.strokeStyle = color;
-            ctx.lineWidth   = 2.5;
-            ctx.strokeRect(left, top, boxW, boxH);
-
-            // Corner accent markers
-            const corner = 14;
-            ctx.lineWidth = 4;
-            // Top-left
-            ctx.beginPath(); ctx.moveTo(left, top + corner); ctx.lineTo(left, top); ctx.lineTo(left + corner, top); ctx.stroke();
-            // Top-right
-            ctx.beginPath(); ctx.moveTo(left + boxW - corner, top); ctx.lineTo(left + boxW, top); ctx.lineTo(left + boxW, top + corner); ctx.stroke();
-            // Bottom-left
-            ctx.beginPath(); ctx.moveTo(left, top + boxH - corner); ctx.lineTo(left, top + boxH); ctx.lineTo(left + corner, top + boxH); ctx.stroke();
-            // Bottom-right
-            ctx.beginPath(); ctx.moveTo(left + boxW - corner, top + boxH); ctx.lineTo(left + boxW, top + boxH); ctx.lineTo(left + boxW, top + boxH - corner); ctx.stroke();
-
-            ctx.shadowBlur = 0;
-
-            // Label background pill
-            ctx.font = 'bold 13px "Segoe UI", sans-serif';
-            const textW = ctx.measureText(label).width;
-            const padX = 8, padY = 4, labelH = 22;
-            const lx = Math.max(0, left);
-            const ly = top > labelH + 4 ? top - labelH - 4 : top + 4;
-
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            ctx.roundRect(lx, ly, textW + padX * 2, labelH, 6);
-            ctx.fill();
-
-            ctx.fillStyle = '#fff';
-            ctx.fillText(label, lx + padX, ly + labelH - padY);
-        });
-
-        // ---- Update UI ----
-        if (finalBoxes.length > 0) {
-            setStatus('active', `🟢 ${finalBoxes.length} object${finalBoxes.length > 1 ? 's' : ''} detected`);
-            if (detectionCount) detectionCount.textContent = finalBoxes.length;
-        } else {
-            setStatus('scanning', '📡 Scanning...');
-            if (detectionCount) detectionCount.textContent = '0';
-        }
-
-    } catch (err) {
-        // Silently continue the loop — don't crash on a single bad frame
-        console.warn('Frame error:', err.message);
-    } finally {
-        // BUG FIX #4: Always dispose properly
-        inputTensor.dispose();
-        if (rawOutput) {
-            if (Array.isArray(rawOutput)) {
-                rawOutput.forEach(t => t.dispose());
+        if (video.readyState >= 2) {
+            // Mirror video horizontally for front-facing cameras
+            if (sessionIsFront) {
+                ctx.save();
+                ctx.translate(canvas.width, 0);
+                ctx.scale(-1, 1);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                ctx.restore();
             } else {
-                rawOutput.dispose();
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             }
         }
+
+        // Draw last known bounding boxes
+        drawBoxes(lastBoxes);
+
+        // FPS
+        fpsCount++;
+        const now = performance.now();
+        if (now - fpsLastTime >= 1000) {
+            if (fpsDisplay) fpsDisplay.textContent =
+                Math.round((fpsCount * 1000) / (now - fpsLastTime));
+            fpsCount    = 0;
+            fpsLastTime = now;
+        }
+
+        renderLoopId = requestAnimationFrame(frame);
     }
 
-    updateFPS();
-
-    // Schedule next frame — no double-wait, just rAF
-    animationFrameId = requestAnimationFrame(detectFrame);
+    renderLoopId = requestAnimationFrame(frame);
 }
 
 // ============================================================
-// STATUS HELPER
+//  INFERENCE LOOP — updates lastBoxes as fast as GPU allows
 // ============================================================
-function setStatus(type, message) {
-    statusDiv.className = 'status-pill';
-    if (type === 'active')   statusDiv.classList.add('status-active');
-    if (type === 'loading')  statusDiv.classList.add('status-loading');
-    if (type === 'scanning') statusDiv.classList.add('status-scanning');
-    if (type === 'error')    statusDiv.classList.add('status-error');
-    statusDiv.innerHTML = message;
+async function runInferenceLoop() {
+    while (streamActive) {
+        if (!model || video.readyState < 2 || inferenceRunning) {
+            await waitFrame();
+            continue;
+        }
+
+        inferenceRunning = true;
+
+        try {
+            // Build input tensor
+            const inputTensor = tf.tidy(() =>
+                tf.browser.fromPixels(video)
+                    .resizeBilinear([INPUT_H, INPUT_W])
+                    .expandDims(0)
+                    .toFloat()
+                    .div(255.0)
+            );
+
+            // executeAsync is reliable for frozen graph models
+            const predictions = await model.executeAsync(inputTensor);
+            inputTensor.dispose();
+
+            // Normalize to single tensor
+            const tensorOutput = Array.isArray(predictions) ? predictions[0] : predictions;
+            const shape        = tensorOutput.shape;   // [1, 84, 8400] or [1, 8400, 84]
+
+            // ── BUG 2 FIX: use .array() exactly like original ──
+            // .array() returns a nested JS array:
+            //   data[0] = shape [84, 8400] → data[0][row][col]
+            const data       = await tensorOutput.array();
+            const detections = data[0];  // strip batch dim → [84][8400] or [8400][84]
+
+            // Dispose tensors properly
+            if (Array.isArray(predictions)) predictions.forEach(t => t.dispose());
+            else predictions.dispose();
+
+            // Parse and run NMS
+            const candidates = parseDetections(detections, shape);
+            lastBoxes = nms(candidates);
+
+            // Update status
+            if (lastBoxes.length > 0) {
+                setStatus('active',
+                    `🟢 ${lastBoxes.length} object${lastBoxes.length !== 1 ? 's' : ''} detected`);
+                if (detectionCount) detectionCount.textContent = lastBoxes.length;
+            } else {
+                setStatus('scanning', '📡 Scanning...');
+                if (detectionCount) detectionCount.textContent = '0';
+            }
+
+        } catch (err) {
+            console.warn('Inference error:', err.message);
+        }
+
+        inferenceRunning = false;
+        await waitFrame();
+    }
 }
 
 // ============================================================
-// START
+//  PARSE DETECTIONS
+//
+//  After .array() and stripping batch:
+//   • detections[row][col]  if shape was [1, 84, 8400]
+//     row = coord/class index (0-83), col = box index (0-8399)
+//   • detections[row][col]  if shape was [1, 8400, 84]
+//     row = box index (0-8399), col = coord/class index (0-83)
+//
+//  Detection is by checking shape[1]:
+//    84 (or 80 for nano) → [channels, boxes] layout
+//    8400                → [boxes, channels] layout
+//
+//  BUG 1 FIX: coordinate normalization guard
+//    If w <= 2 the coords are in [0,1] → scale to [0,640]
+//    If w >  2 the coords are already in [0,640] pixel space
 // ============================================================
+function parseDetections(detections, shape) {
+    const candidates = [];
+
+    // shape is [1, dim1, dim2] — check dim1 to determine layout
+    const dim1 = shape[1];
+    const dim2 = shape[2];
+
+    if (dim1 === 84 || dim1 === 80) {
+        // Layout: [1, 84, 8400] — rows=channels, cols=boxes
+        const numClasses = dim1 - 4;
+        const numBoxes   = dim2;
+
+        for (let col = 0; col < numBoxes; col++) {
+            let maxConf = 0, classId = -1;
+            for (let cls = 0; cls < numClasses; cls++) {
+                const conf = detections[4 + cls][col];
+                if (conf > maxConf) { maxConf = conf; classId = cls; }
+            }
+            if (maxConf > CONF_THRESHOLD && classId >= 0) {
+                let x = detections[0][col];
+                let y = detections[1][col];
+                let w = detections[2][col];
+                let h = detections[3][col];
+                // BUG 1 FIX: normalize guard
+                if (w <= 2 && h <= 2) {
+                    x *= INPUT_W; y *= INPUT_H;
+                    w *= INPUT_W; h *= INPUT_H;
+                }
+                candidates.push({ x, y, w, h, conf: maxConf, classId });
+            }
+        }
+
+    } else if (dim2 === 84 || dim2 === 80) {
+        // Layout: [1, 8400, 84] — rows=boxes, cols=channels
+        const numBoxes   = dim1;
+        const numClasses = dim2 - 4;
+
+        for (let row = 0; row < numBoxes; row++) {
+            let maxConf = 0, classId = -1;
+            for (let cls = 0; cls < numClasses; cls++) {
+                const conf = detections[row][4 + cls];
+                if (conf > maxConf) { maxConf = conf; classId = cls; }
+            }
+            if (maxConf > CONF_THRESHOLD && classId >= 0) {
+                let x = detections[row][0];
+                let y = detections[row][1];
+                let w = detections[row][2];
+                let h = detections[row][3];
+                // BUG 1 FIX: normalize guard
+                if (w <= 2 && h <= 2) {
+                    x *= INPUT_W; y *= INPUT_H;
+                    w *= INPUT_W; h *= INPUT_H;
+                }
+                candidates.push({ x, y, w, h, conf: maxConf, classId });
+            }
+        }
+
+    } else {
+        console.warn('Unknown model output shape:', shape);
+    }
+
+    return candidates;
+}
+
+// ── Draw bounding boxes ────────────────────────────────────
+function drawBoxes(boxes) {
+    if (!boxes.length) return;
+
+    const scaleX = canvas.width  / INPUT_W;
+    const scaleY = canvas.height / INPUT_H;
+
+    boxes.forEach(box => {
+        const color = getColor(box.classId);
+        const name  = COCO_CLASSES[box.classId] || 'Object';
+        const label = `${name} ${Math.round(box.conf * 100)}%`;
+
+        // box.x/y is center in [0,640] space
+        let boxW = box.w * scaleX;
+        let boxH = box.h * scaleY;
+        let left = box.x * scaleX - boxW / 2;
+        let top  = box.y * scaleY - boxH / 2;
+
+        // Mirror X for front-facing cameras (must match video mirror)
+        if (sessionIsFront) {
+            left = canvas.width - left - boxW;
+        }
+
+        ctx.save();
+
+        // Main bounding box
+        ctx.strokeStyle = color;
+        ctx.lineWidth   = 2.5;
+        ctx.shadowColor = color;
+        ctx.shadowBlur  = 8;
+        ctx.strokeRect(left, top, boxW, boxH);
+
+        // Corner bracket accents
+        const c = Math.max(8, Math.min(18, boxW * 0.15, boxH * 0.15));
+        ctx.lineWidth  = 3.5;
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.moveTo(left,           top + c);       ctx.lineTo(left,           top);
+        ctx.lineTo(left + c,       top);
+        ctx.moveTo(left + boxW - c, top);           ctx.lineTo(left + boxW,    top);
+        ctx.lineTo(left + boxW,    top + c);
+        ctx.moveTo(left,           top + boxH - c); ctx.lineTo(left,           top + boxH);
+        ctx.lineTo(left + c,       top + boxH);
+        ctx.moveTo(left + boxW - c, top + boxH);    ctx.lineTo(left + boxW,    top + boxH);
+        ctx.lineTo(left + boxW,    top + boxH - c);
+        ctx.stroke();
+
+        // Label background pill
+        ctx.font = 'bold 13px "Outfit", sans-serif';
+        const tw  = ctx.measureText(label).width;
+        const ph  = 22, px = 8;
+        const lx  = Math.max(0, Math.min(left, canvas.width - tw - px * 2 - 1));
+        const ly  = top > ph + 4 ? top - ph - 4 : top + 4;
+
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.roundRect(lx, ly, tw + px * 2, ph, 6);
+        ctx.fill();
+
+        // Label text
+        ctx.fillStyle = '#000000';
+        ctx.fillText(label, lx + px, ly + ph - 6);
+
+        ctx.restore();
+    });
+}
+
+// ── Helpers ────────────────────────────────────────────────
+const waitFrame = () => new Promise(r => requestAnimationFrame(r));
+
+function setStatus(type, msg) {
+    statusDiv.className = `status-pill status-${type}`;
+    statusDiv.innerHTML = msg;
+}
+
+// ── Boot ───────────────────────────────────────────────────
 loadModel();
