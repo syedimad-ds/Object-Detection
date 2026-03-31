@@ -10,17 +10,42 @@
 
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm"></script>
+
+    <style>
+        /* New styling for the HD toggle button */
+        .hd-toggle-btn {
+            position: absolute;
+            bottom: 20px;
+            right: 80px; /* Placed next to camera switch */
+            background: rgba(0, 0, 0, 0.6);
+            border: 2px solid #00C2FF;
+            color: #00C2FF;
+            border-radius: 50%;
+            width: 44px;
+            height: 44px;
+            font-weight: bold;
+            font-size: 12px;
+            cursor: pointer;
+            z-index: 100;
+            transition: all 0.3s ease;
+        }
+        .hd-toggle-btn.active {
+            background: #00C2FF;
+            color: #000;
+            box-shadow: 0 0 15px #00C2FF;
+        }
+    </style>
 </head>
 <body>
 
-    <!-- Header -->
     <header class="app-header">
         <div class="header-content">
             <div class="brand">
                 <span class="brand-icon">⬡</span>
                 <div class="brand-text">
                     <h1>Edge<span class="brand-accent">AI</span></h1>
-                    <p class="brand-sub">Real-Time Object Detection</p>
+                    <p class="brand-sub" id="modelIndicator">Real-Time Object Detection (Nano)</p>
                 </div>
             </div>
             <div class="header-stats">
@@ -36,45 +61,39 @@
         </div>
     </header>
 
-    <!-- Status bar -->
     <div class="status-container">
         <div id="status" class="status-pill status-loading">
-            ⏳ Loading YOLO Model... Please wait.
+            ⏳ System Initializing...
         </div>
     </div>
 
-    <!-- Camera viewport -->
     <main class="viewport-container">
         <div class="video-wrapper" id="videoWrapper">
 
-            <!-- Corner scan lines decoration -->
             <div class="scan-corner tl"></div>
             <div class="scan-corner tr"></div>
             <div class="scan-corner bl"></div>
             <div class="scan-corner br"></div>
-
-            <!-- Scan line animation overlay -->
             <div class="scan-line" id="scanLine"></div>
 
             <video id="webcam" autoplay playsinline muted></video>
             <canvas id="output_canvas"></canvas>
 
-            <!-- Camera switch (mobile only) -->
+            <button id="hdModeBtn" class="hd-toggle-btn" title="Toggle HD Model (YOLOv8s)">HD</button>
+
             <button id="switchCamBtn" class="cam-switch-btn" title="Switch Camera">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
                     <circle cx="12" cy="13" r="4"/>
                 </svg>
             </button>
-
         </div>
     </main>
 
-    <!-- Info strip -->
     <footer class="info-strip">
-        <span class="info-item">🔒 100% Local · No data sent to servers</span>
+        <span class="info-item">🔒 100% Local · No Server</span>
         <span class="info-sep">·</span>
-        <span class="info-item">⚡ YOLOv8 + TensorFlow.js</span>
+        <span class="info-item">⚡ Adaptive Fallback AI</span>
         <span class="info-sep">·</span>
         <span class="info-item">80 COCO classes</span>
     </footer>
