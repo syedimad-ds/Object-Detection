@@ -1,5 +1,5 @@
 // ============================================================
-//  EDGE AI — Object Detection | EXTREME MOBILE OPTIMIZED
+//  EDGE AI — Object Detection | ADAPTIVE DYNAMIC RESOLUTION
 // ============================================================
 
 const video          = document.getElementById('webcam');
@@ -12,13 +12,21 @@ const fpsDisplay     = document.getElementById('fpsDisplay');
 const detectionCount = document.getElementById('detectionCount');
 const modelIndicator = document.getElementById('modelIndicator');
 
+// ── Device Detection ───────────────────────────────────────
+const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
+
+// ── DYNAMIC RESOLUTION STATE (The Magic Trick) ─────────────
+let isHDMode = !isMobile; // Mobile pe off, Laptop pe on by default
+
+// 320x320 for Mobile (Nano), 640x640 for Laptop/HD (Small)
+let INPUT_W = isHDMode ? 640 : 320;
+let INPUT_H = isHDMode ? 640 : 320;
+
 // ── Mobile Specific Optimizer (Offscreen Canvas) ───────────
 const processCanvas = document.createElement('canvas');
-const INPUT_W       = 640;
-const INPUT_H       = 640;
 processCanvas.width = INPUT_W;
 processCanvas.height = INPUT_H;
-// willReadFrequently prevents aggressive Garbage Collection stutters
 const processCtx = processCanvas.getContext('2d', { willReadFrequently: true, alpha: false });
 
 // ── Session State ──────────────────────────────────────────
@@ -29,17 +37,13 @@ let inferenceRunning  = false;
 let lastBoxes         = [];
 let renderLoopId      = null;
 let sessionIsFront    = false;
-let isHDMode          = false; 
 let backendName       = 'unknown';
 
 let fpsCount    = 0;
 let fpsLastTime = performance.now();
 
-const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
-
-const modelPathNano  = './yolov8n_web_model/model.json';
-const modelPathSmall = './yolov8s_web_model/model.json';
+const modelPathNano  = './yolov8n_web_model/model.json'; // 320x320 export
+const modelPathSmall = './yolov8s_web_model/model.json'; // 640x640 export
 
 const CONF_THRESHOLD = isMobile ? 0.35 : 0.40;
 const IOU_THRESHOLD  = 0.45;
@@ -65,7 +69,7 @@ const CLASS_COLORS = [
 ];
 const getColor = id => CLASS_COLORS[id % CLASS_COLORS.length];
 
-// ── WebGL Tuning for Mali/Mid-range GPUs ───────────────────
+// ── WebGL Tuning ───────────────────────────────────────────
 async function initBackend() {
     try {
         await tf.setBackend('webgl');
@@ -74,7 +78,7 @@ async function initBackend() {
         }
         tf.env().set('WEBGL_PACK', true);
         tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 0);
-        tf.env().set('WEBGL_FLUSH_THRESHOLD', 1); // Prevents GPU timeouts on mobile
+        tf.env().set('WEBGL_FLUSH_THRESHOLD', 1);
         backendName = 'WebGL (GPU)';
     } catch (err) {
         console.warn('WebGL failed. Fallback to WASM...');
@@ -95,12 +99,12 @@ async function loadModel() {
     try {
         setStatus('loading', `⏳ Initializing ${backendName}...`);
         if (model) {
-            model.dispose();
+            model.dispose(); // Old model memory clear
             model = null;
         }
 
         const path = isHDMode ? modelPathSmall : modelPathNano;
-        setStatus('loading', `⏳ Downloading ${isHDMode ? 'Small' : 'Nano'} model...`);
+        setStatus('loading', `⏳ Downloading ${isHDMode ? 'Small (640)' : 'Nano (320)'} model...`);
         model = await tf.loadGraphModel(path);
 
         setStatus('loading', '🔥 Warming up AI...');
@@ -119,10 +123,21 @@ async function loadModel() {
     }
 }
 
+// ── DYNAMIC RESOLUTION TOGGLE ──────────────────────────────
 if (hdModeBtn) {
+    // Initial UI state setup
+    if (isHDMode) hdModeBtn.classList.add('active');
+
     hdModeBtn.addEventListener('click', async () => {
         isHDMode = !isHDMode;
         hdModeBtn.classList.toggle('active', isHDMode);
+        
+        // Asli Switch: Update Variables & Process Canvas
+        INPUT_W = isHDMode ? 640 : 320;
+        INPUT_H = isHDMode ? 640 : 320;
+        processCanvas.width = INPUT_W;
+        processCanvas.height = INPUT_H;
+
         streamActive = false;
         await loadModel();
         streamActive = true;
@@ -136,8 +151,14 @@ async function startWebcam() {
     inferenceRunning = false;
     lastBoxes = [];
 
-    if (renderLoopId !== null) cancelAnimationFrame(renderLoopId);
-    if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+    if (renderLoopId !== null) {
+        cancelAnimationFrame(renderLoopId);
+        renderLoopId = null;
+    }
+    if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+    }
 
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -175,7 +196,7 @@ if (switchCamBtn) {
     });
 }
 
-// ── Smooth Video Render Loop (Runs Fast!) ──────────────────
+// ── Smooth Video Render Loop ───────────────────────────────
 function startRenderLoop() {
     function frame() {
         if (!streamActive) return;
@@ -206,7 +227,7 @@ function startRenderLoop() {
     renderLoopId = requestAnimationFrame(frame);
 }
 
-// ── AI Inference Engine (Smartly Throttled) ────────────────
+// ── AI Inference Engine (GPU Accelerated NMS) ──────────────
 async function runInferenceLoop() {
     while (streamActive) {
         if (!model || video.readyState < 2 || inferenceRunning) {
@@ -217,11 +238,9 @@ async function runInferenceLoop() {
         inferenceRunning = true;
 
         try {
-            // OPTIMIZATION 1: Hardware Accelerated Canvas Resizing
-            // Yeh phone ke Exynos scaler ka use karta hai, jisse GPU ka load 40% kam hota hai.
+            // Hardware Accelerated Resizing to current INPUT_W / INPUT_H
             processCtx.drawImage(video, 0, 0, INPUT_W, INPUT_H);
 
-            // OPTIMIZATION 2: Tensor Math on GPU
             const { nmsBoxes, maxScores, classIds } = tf.tidy(() => {
                 const inputTensor = tf.browser.fromPixels(processCanvas)
                     .expandDims(0)
@@ -262,12 +281,10 @@ async function runInferenceLoop() {
                 return { nmsBoxes: tfNmsBoxes, maxScores: tfMaxScores, classIds: tfClassIds };
             });
 
-            // Run backend C++ NMS
             const selectedIndicesTensor = await tf.image.nonMaxSuppressionAsync(
                 nmsBoxes, maxScores, MAX_DETECTIONS, IOU_THRESHOLD, CONF_THRESHOLD
             );
 
-            // Fetch only exact data needed
             const indicesArr = await selectedIndicesTensor.data();
             const boxesFlat = await nmsBoxes.data();
             const scoresFlat = await maxScores.data();
@@ -288,6 +305,7 @@ async function runInferenceLoop() {
                 let cx = x1 + w / 2;
                 let cy = y1 + h / 2;
 
+                // Scale to current INPUT_W / INPUT_H if normalized
                 if (w <= 2 && h <= 2) { 
                     cx *= INPUT_W; cy *= INPUT_H; w *= INPUT_W; h *= INPUT_H; 
                 }
@@ -314,9 +332,6 @@ async function runInferenceLoop() {
 
         inferenceRunning = false;
 
-        // OPTIMIZATION 3: Dynamic AI Throttling
-        // Phone GPU ko thanda rakhne ke liye hum AI ko max 15-20 FPS par cap kar rahe hain. 
-        // Video 60fps pe smooth dikhegi, lekin AI calculation stable rahegi.
         const coolingDelay = isMobile ? 60 : 10; 
         await new Promise(resolve => setTimeout(resolve, coolingDelay)); 
     }
@@ -326,6 +341,7 @@ async function runInferenceLoop() {
 function drawBoxes(boxes) {
     if (!boxes.length) return;
 
+    // Scale from Dynamic INPUT_W / H to Canvas dimensions
     const scaleX = canvas.width  / INPUT_W;
     const scaleY = canvas.height / INPUT_H;
 
