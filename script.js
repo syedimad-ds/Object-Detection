@@ -17,7 +17,7 @@ const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/
 if (!isMobile && switchCamBtn) switchCamBtn.style.display = 'none';
 
 // ── DYNAMIC RESOLUTION STATE ───────────────────────────────
-let isHDMode = !isMobile; // Mobile pe Nano(320), Laptop pe Small(640)
+let isHDMode = !isMobile;
 
 let INPUT_W = isHDMode ? 640 : 320;
 let INPUT_H = isHDMode ? 640 : 320;
@@ -43,9 +43,9 @@ const modelPathNano  = './yolov8n_web_model/model.json';
 const modelPathSmall = './yolov8s_web_model/model.json'; 
 
 // ── STRICT AI TUNING (To remove noise & overlapping) ───────
-const CONF_THRESHOLD = isMobile ? 0.50 : 0.55; // Sirf 50%+ confident objects
-const IOU_THRESHOLD  = 0.35;                   // Overlapping boxes ko sakhti se merge karega
-const MAX_DETECTIONS = 10;                     // Screen par ek baar mein max 10 objects
+const CONF_THRESHOLD = isMobile ? 0.50 : 0.55; 
+const IOU_THRESHOLD  = 0.35;                   
+const MAX_DETECTIONS = 10;                     
 
 const COCO_CLASSES = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
