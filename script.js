@@ -1,5 +1,5 @@
 // ============================================================
-//  EDGE AI — Object Detection | THE ULTIMATE OPTIMIZED VERSION
+//  EDGE AI — Object Detection
 // ============================================================
 
 const video          = document.getElementById('webcam');
